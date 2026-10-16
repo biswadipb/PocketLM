@@ -14,7 +14,6 @@ import androidx.activity.viewModels
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import androidx.biometric.BiometricPrompt
-import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
@@ -63,10 +62,9 @@ class MainActivity : FragmentActivity() {
             val locked by vm.locked.collectAsStateWithLifecycle()
             LaunchedEffect(locked) { if (locked) promptUnlock() }
             PocketLmTheme(mode) {
-                Box {
-                    PocketLmApp(vm)
-                    if (locked) LockScreen(onUnlock = ::promptUnlock)
-                }
+                // While locked the app is not composed at all, so nothing underneath can be seen,
+                // focused, read by an accessibility service, or tapped.
+                if (locked) LockScreen(onUnlock = ::promptUnlock) else PocketLmApp(vm)
             }
         }
     }

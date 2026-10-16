@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
 
 /**
  * Runs model downloads independently of any screen, so they carry on while the app is in the
@@ -41,16 +42,22 @@ class DownloadCenter private constructor(private val context: Context) {
     val events: SharedFlow<Event> = _events.asSharedFlow()
 
     fun start(url: String, fileName: String) {
-        if (jobs[fileName]?.isActive == true) return
+        val previous = jobs[fileName]
+        if (previous?.isActive == true) return
         _downloads.update { it + (fileName to DownloadState(null)) }
         // If the system refuses a foreground service the download still runs, just without the notification.
         runCatching { ContextCompat.startForegroundService(context, Intent(context, DownloadService::class.java)) }
 
         jobs[fileName] = scope.launch {
+            val self = coroutineContext[Job]
+            // A cancelled download may still be unwinding; wait so two jobs never write the same file.
+            previous?.join()
             try {
                 store.download(url, fileName) { done, total ->
-                    val progress = if (total > 0) done.toFloat() / total else null
-                    _downloads.update { it + (fileName to DownloadState(progress)) }
+                    if (jobs[fileName] === self) {
+                        val progress = if (total > 0) done.toFloat() / total else null
+                        _downloads.update { it + (fileName to DownloadState(progress)) }
+                    }
                 }
                 _events.tryEmit(Event.Completed(fileName))
             } catch (e: CancellationException) {
@@ -58,8 +65,8 @@ class DownloadCenter private constructor(private val context: Context) {
             } catch (e: Exception) {
                 _events.tryEmit(Event.Failed(fileName, e.message ?: e::class.simpleName.orEmpty()))
             } finally {
-                _downloads.update { it - fileName }
-                jobs.remove(fileName)
+                // Only clear the state if a newer download of this file has not taken over.
+                if (jobs.remove(fileName, self)) _downloads.update { it - fileName }
             }
         }
     }

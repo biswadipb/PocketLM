@@ -379,22 +379,29 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val _storage = MutableStateFlow<StorageReport?>(null)
     val storage = _storage.asStateFlow()
 
-    private fun referencedImages(): Set<String> =
-        (_chats.value.flatMap { c -> c.messages.mapNotNull { it.imagePath } } +
+    /**
+     * Images and documents some chat still uses. The saved chats are read from disk here rather than taken
+     * from memory, which is empty until the first load finishes and would make everything look unused.
+     */
+    private suspend fun referencedFiles(): Pair<Set<String>, Set<String>> {
+        val chats = chatStore.list().also { _chats.value = it }
+        val images = (chats.flatMap { c -> c.messages.mapNotNull { it.imagePath } } +
             _messages.value.mapNotNull { it.imagePath } + listOfNotNull(_pendingImage.value)).toSet()
-
-    private fun referencedDocIds(): Set<String> =
-        (_chats.value.flatMap { c -> c.attachments.map { it.id } } + _attachments.value.map { it.id }).toSet()
+        val documents = (chats.flatMap { c -> c.attachments.map { it.id } } + _attachments.value.map { it.id }).toSet()
+        return images to documents
+    }
 
     fun refreshStorage() {
         viewModelScope.launch {
-            _storage.value = storageManager.report(referencedImages(), referencedDocIds())
+            val (images, documents) = referencedFiles()
+            _storage.value = storageManager.report(images, documents)
         }
     }
 
     fun cleanUpStorage() {
         viewModelScope.launch {
-            val removed = storageManager.deleteUnused(referencedImages(), referencedDocIds())
+            val (images, documents) = referencedFiles()
+            val removed = storageManager.deleteUnused(images, documents)
             storageManager.clearCache()
             _error.value = if (removed == 0) "Cache cleared. No unused files found." else "Cache cleared and $removed unused files removed."
             refreshStorage()
@@ -556,14 +563,18 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (!on) stopSpeaking()
     }
 
-    private val speaker by lazy {
-        Speaker(getApplication(), onSpeaking = { _speakingId.value = it }, onProblem = { _error.value = it })
+    // Created on first use and shut down in onCleared, so an unused voice engine is never started.
+    private var speaker: Speaker? = null
+
+    fun speak(message: ChatMessage) {
+        val voice = speaker ?: Speaker(
+            getApplication(), onSpeaking = { _speakingId.value = it }, onProblem = { _error.value = it },
+        ).also { speaker = it }
+        voice.speak(message.id, message.text)
     }
 
-    fun speak(message: ChatMessage) = speaker.speak(message.id, message.text)
-
     fun stopSpeaking() {
-        if (_speakingId.value != null) speaker.stop()
+        speaker?.stop()
     }
 
     // ---- Quick access (tile, widget, shortcut) -------------------------------------
@@ -770,9 +781,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Model management -------------------------------------------------
 
+    /** Downloads whichever of the model and its vision add-on are not on the phone yet. */
     fun download(model: CatalogModel) {
-        startDownload(model.url, model.fileName)
-        if (model.projectorUrl != null && model.projectorFileName != null) {
+        if (_models.value.none { it.fileName == model.fileName }) startDownload(model.url, model.fileName)
+        if (model.projectorUrl != null && model.projectorFileName != null &&
+            _projectors.value.none { it.fileName == model.projectorFileName }
+        ) {
             startDownload(model.projectorUrl, model.projectorFileName)
         }
     }
@@ -1068,6 +1082,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "Generation failed: ${e.message ?: e::class.simpleName}"
             } finally {
                 _generating.value = false
+                if (count == 0) {
+                    // Nothing was written (an error, or stopped before the first word): drop the empty bubble.
+                    _messages.update { list ->
+                        if (list.lastOrNull()?.let { !it.isUser && it.text.isEmpty() } == true) list.dropLast(1) else list
+                    }
+                }
                 if (count > 0) {
                     val genMs = (SystemClock.elapsedRealtime() - firstAt).coerceAtLeast(1)
                     val stats = GenStats(
@@ -1297,7 +1317,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         if (ApiGateway.backend === apiBackend) ApiGateway.backend = null
         stopDeviceMonitoring()
-        if (_speakingId.value != null || _readAloud.value) runCatching { speaker.shutdown() }
+        speaker?.let { runCatching { it.shutdown() } }
+        speaker = null
         stopGeneration()
         super.onCleared()
     }

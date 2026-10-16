@@ -40,55 +40,8 @@ class ModelStore(private val context: Context) {
      * Downloads [url] to the models folder, resuming a partial download when the server allows it.
      * [onProgress] receives (bytesDone, totalBytes); total is -1 when unknown.
      */
-    suspend fun download(
-        url: String,
-        fileName: String,
-        onProgress: (Long, Long) -> Unit,
-    ) = withContext(Dispatchers.IO) {
-        val target = File(dir, fileName)
-        val partial = File(dir, "$fileName.part")
-        var offset = if (partial.exists()) partial.length() else 0L
-
-        val conn = URL(url).openConnection() as HttpURLConnection
-        try {
-            conn.instanceFollowRedirects = true
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 30_000
-            if (offset > 0) conn.setRequestProperty("Range", "bytes=$offset-")
-            conn.connect()
-
-            when (conn.responseCode) {
-                HttpURLConnection.HTTP_OK -> offset = 0L // server ignored Range; start over
-                HttpURLConnection.HTTP_PARTIAL -> Unit
-                else -> throw IOException("Download failed: HTTP ${conn.responseCode}")
-            }
-            val total = conn.contentLengthLong.let { if (it < 0) -1L else it + offset }
-
-            conn.inputStream.use { input ->
-                java.io.FileOutputStream(partial, offset > 0).use { out ->
-                    val buf = ByteArray(64 * 1024)
-                    var done = offset
-                    var lastReport = 0L
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        out.write(buf, 0, n)
-                        done += n
-                        val now = System.currentTimeMillis()
-                        if (now - lastReport > 250) {
-                            lastReport = now
-                            onProgress(done, total)
-                        }
-                    }
-                    onProgress(done, total)
-                }
-            }
-        } finally {
-            conn.disconnect()
-        }
-        if (!partial.renameTo(target)) throw IOException("Could not save $fileName")
-    }
+    suspend fun download(url: String, fileName: String, onProgress: (Long, Long) -> Unit) =
+        Downloader.download(url, File(dir, fileName), File(dir, "$fileName.part"), onProgress)
 
     /** Copies a model picked with the system file picker into private storage. */
     suspend fun import(uri: Uri): String = withContext(Dispatchers.IO) {

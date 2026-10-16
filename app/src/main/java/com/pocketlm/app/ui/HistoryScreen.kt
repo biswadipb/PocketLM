@@ -167,13 +167,6 @@ fun HistoryScreen(
 }
 
 @Composable
-private fun Hint(text: String) {
-    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
 private fun ChatRow(
     chat: SavedChat,
     onClick: () -> Unit,

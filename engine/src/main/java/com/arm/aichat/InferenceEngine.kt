@@ -131,3 +131,6 @@ val State.isModelLoaded: Boolean
         this is State.Generating
 
 class UnsupportedArchitectureException : Exception()
+
+/** The prompt could not be processed (for example it does not fit); the loaded model is still usable. */
+class PromptNotProcessed(message: String) : Exception(message)

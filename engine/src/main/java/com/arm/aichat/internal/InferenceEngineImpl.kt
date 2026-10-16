@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.PromptNotProcessed
 import com.arm.aichat.UnsupportedArchitectureException
 import com.arm.aichat.internal.InferenceEngineImpl.Companion.getInstance
 import dalvik.annotation.optimization.FastNative
@@ -235,7 +236,7 @@ internal class InferenceEngineImpl private constructor(
         predictLength: Int,
     ): Flow<String> {
         require(message.isNotEmpty()) { "User prompt discarded due to being empty!" }
-        return generateReply { processUserPrompt(message, predictLength) }
+        return generateReply(::textPromptProblem) { processUserPrompt(message, predictLength) }
     }
 
     override fun sendUserPromptWithImage(
@@ -244,7 +245,7 @@ internal class InferenceEngineImpl private constructor(
         predictLength: Int,
     ): Flow<String> {
         require(File(imagePath).isFile) { "Image not found" }
-        return generateReply { processUserPromptWithImage(message, imagePath, predictLength) }
+        return generateReply(::imagePromptProblem) { processUserPromptWithImage(message, imagePath, predictLength) }
     }
 
     override suspend fun resetConversation(systemPrompt: String) {
@@ -284,10 +285,20 @@ internal class InferenceEngineImpl private constructor(
             result == 0
         }
 
+    private fun textPromptProblem(code: Int) = "The model could not read that message (error $code)."
+
+    private fun imagePromptProblem(code: Int) = when (code) {
+        1 -> "This model has no vision add-on loaded."
+        2 -> "The image could not be read."
+        3 -> "The image could not be prepared for this model."
+        4 -> "The image does not fit in what is left of the conversation. Start a new chat or raise the context length in Settings."
+        else -> "The model could not read that image (error $code)."
+    }
+
     /**
      * Runs [processPrompt] on the native side, then streams the generated tokens.
      */
-    private fun generateReply(processPrompt: () -> Int): Flow<String> = flow {
+    private fun generateReply(describe: (Int) -> String, processPrompt: () -> Int): Flow<String> = flow {
         check(_state.value is InferenceEngine.State.ModelReady) {
             "User prompt discarded due to: ${_state.value.javaClass.simpleName}"
         }
@@ -297,12 +308,10 @@ internal class InferenceEngineImpl private constructor(
             _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ProcessingUserPrompt
 
-            processPrompt().let { result ->
-                if (result != 0) {
-                    Log.e(TAG, "Failed to process user prompt: $result")
-                    _state.value = InferenceEngine.State.ModelReady
-                    return@flow
-                }
+            val result = processPrompt()
+            if (result != 0) {
+                Log.e(TAG, "Failed to process user prompt: $result")
+                throw PromptNotProcessed(describe(result))
             }
 
             Log.i(TAG, "User prompt processed. Generating assistant prompt...")
@@ -320,6 +329,10 @@ internal class InferenceEngineImpl private constructor(
             _state.value = InferenceEngine.State.ModelReady
         } catch (e: CancellationException) {
             Log.i(TAG, "Assistant generation's flow collection cancelled.")
+            _state.value = InferenceEngine.State.ModelReady
+            throw e
+        } catch (e: PromptNotProcessed) {
+            // The model is still fine; only this prompt could not be used.
             _state.value = InferenceEngine.State.ModelReady
             throw e
         } catch (e: Exception) {

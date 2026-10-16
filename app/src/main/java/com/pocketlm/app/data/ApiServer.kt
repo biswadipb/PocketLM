@@ -16,6 +16,7 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 
 data class ApiMessage(val role: String, val content: String)
 
@@ -41,7 +42,9 @@ class ApiServer(
     private val port: Int,
     private val apiKey: () -> String?,
     private val backend: () -> ApiBackend?,
+    maxConnections: Int = MAX_CONNECTIONS,
 ) {
+    private val permits = Semaphore(maxConnections)
     private var serverSocket: ServerSocket? = null
     private val pool = Executors.newCachedThreadPool { r -> Thread(r, "pocketlm-api").apply { isDaemon = true } }
 
@@ -56,7 +59,18 @@ class ApiServer(
                 } catch (e: IOException) {
                     break
                 }
-                pool.execute { handle(client) }
+                if (permits.tryAcquire()) {
+                    pool.execute {
+                        try {
+                            handle(client)
+                        } finally {
+                            permits.release()
+                        }
+                    }
+                } else {
+                    // Too many open connections: turn this one away instead of queueing without limit.
+                    pool.execute { reject(client) }
+                }
             }
         }
         return socket.localPort
@@ -72,13 +86,26 @@ class ApiServer(
 
     private class Request(val method: String, val path: String, val headers: Map<String, String>, val body: ByteArray)
 
+    private fun reject(socket: Socket) {
+        socket.use {
+            socket.soTimeout = 2_000
+            runCatching {
+                val out = BufferedOutputStream(socket.getOutputStream())
+                writeJson(out, 503, errorJson("The server is busy. Try again in a moment.", 503))
+            }
+        }
+    }
+
     private fun handle(socket: Socket) {
         socket.use {
             socket.soTimeout = READ_TIMEOUT_MS
             val out = BufferedOutputStream(socket.getOutputStream())
             try {
-                val request = readRequest(socket.getInputStream())
-                route(request, out)
+                val input = socket.getInputStream()
+                val head = readHead(input)
+                // Check the key before reading the body, so an unauthenticated caller can't make us buffer it.
+                if (!isPublic(head.method, head.path)) authenticate(head.headers)
+                route(Request(head.method, head.path, head.headers, readBody(input, head.headers)), out)
             } catch (e: ApiException) {
                 writeJson(out, e.status, errorJson(e.message ?: "Error", e.status))
             } catch (e: ClientGone) {
@@ -101,8 +128,6 @@ class ApiServer(
             writeRaw(out, 200, "OK", "text/plain; charset=utf-8", "PocketLM API server is running.\n".toByteArray())
             return
         }
-        authenticate(request)
-
         when {
             request.method == "GET" && request.path == "/v1/models" -> {
                 val data = JSONArray((backend()?.modelNames() ?: emptyList()).map {
@@ -115,10 +140,13 @@ class ApiServer(
         }
     }
 
-    private fun authenticate(request: Request) {
+    private fun isPublic(method: String, path: String) =
+        method == "OPTIONS" || (method == "GET" && path == "/")
+
+    private fun authenticate(headers: Map<String, String>) {
         val key = apiKey()
         if (key.isNullOrEmpty()) return
-        val given = request.headers["authorization"]?.removePrefix("Bearer ")?.trim().orEmpty()
+        val given = headers["authorization"]?.removePrefix("Bearer ")?.trim().orEmpty()
         if (!MessageDigest.isEqual(given.toByteArray(), key.toByteArray())) {
             throw ApiException(401, "Missing or wrong API key. Send it as: Authorization: Bearer <key>")
         }
@@ -175,7 +203,9 @@ class ApiServer(
 
     // ---- HTTP plumbing ------------------------------------------------------------------
 
-    private fun readRequest(input: InputStream): Request {
+    private class Head(val method: String, val path: String, val headers: Map<String, String>)
+
+    private fun readHead(input: InputStream): Head {
         val requestLine = readLine(input) ?: throw IOException("Empty request")
         val parts = requestLine.split(' ')
         if (parts.size < 2) throw ApiException(400, "Malformed request line")
@@ -191,6 +221,10 @@ class ApiServer(
             if (headers.size > MAX_HEADERS) throw ApiException(431, "Too many headers")
         }
 
+        return Head(method, path, headers)
+    }
+
+    private fun readBody(input: InputStream, headers: Map<String, String>): ByteArray {
         if (headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true) {
             throw ApiException(411, "Send the body with a Content-Length instead of chunked encoding")
         }
@@ -203,7 +237,7 @@ class ApiServer(
             if (n < 0) throw IOException("Connection closed before the body ended")
             read += n
         }
-        return Request(method, path, headers, body)
+        return body
     }
 
     private fun readLine(input: InputStream): String? {
@@ -281,5 +315,6 @@ class ApiServer(
         const val MAX_BODY_BYTES = 4_000_000
         const val MAX_LINE_BYTES = 8_192
         const val MAX_HEADERS = 64
+        const val MAX_CONNECTIONS = 16
     }
 }

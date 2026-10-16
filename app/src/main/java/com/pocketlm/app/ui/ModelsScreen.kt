@@ -1,7 +1,5 @@
 package com.pocketlm.app.ui
 
-import android.app.ActivityManager
-import android.content.Context
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -73,11 +71,7 @@ fun ModelsScreen(
     val projectorChoice by vm.projectorChoice.collectAsStateWithLifecycle()
     val gen by vm.generationParams.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val memory = remember(models) {
-        ActivityManager.MemoryInfo().also {
-            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(it)
-        }
-    }
+    val memory = rememberMemoryInfo(models)
     var url by rememberSaveable { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -102,15 +96,15 @@ fun ModelsScreen(
                 item { Text("Nothing yet. Download a model below or import a .gguf file.") }
             }
             items(models, key = { it.path }) { m ->
+                val fit = MemoryEstimate.estimate(m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem)
                 LocalModelCard(
                     model = m,
                     info = infos[m.path],
                     sizeText = Formatter.formatShortFileSize(context, m.sizeBytes),
-                    fit = MemoryEstimate.estimate(m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem),
+                    fit = fit,
                     memoryText = "${Formatter.formatShortFileSize(context, memory.availMem)} free of " +
                         Formatter.formatShortFileSize(context, memory.totalMem),
-                    needText = Formatter.formatShortFileSize(context, MemoryEstimate.estimate(
-                        m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem).neededBytes),
+                    needText = Formatter.formatShortFileSize(context, fit.neededBytes),
                     isLoaded = loaded?.path == m.path,
                     busy = loading,
                     onLoad = { vm.load(m); onModelLoaded() },

@@ -119,6 +119,41 @@ class ApiServerTest {
     }
 
     @Test
+    fun aWrongKeyIsRejectedWithoutWaitingForTheBody() {
+        // Announce a 3 MB body but never send it. The server must answer 401 straight away.
+        java.net.Socket("127.0.0.1", port).use { s ->
+            s.soTimeout = 3000
+            s.getOutputStream().apply {
+                write(
+                    ("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\n" +
+                        "Content-Length: 3000000\r\n\r\n").toByteArray()
+                )
+                flush()
+            }
+            val status = s.getInputStream().bufferedReader().readLine()
+            assertTrue(status, status.contains("401"))
+        }
+    }
+
+    @Test
+    fun tooManyOpenConnectionsAreTurnedAway() {
+        val small = ApiServer(0, { key }, { backend }, maxConnections = 1)
+        val smallPort = small.start()
+        try {
+            // This connection sends nothing and holds the only slot.
+            java.net.Socket("127.0.0.1", smallPort).use {
+                Thread.sleep(300)
+                val c = URL("http://127.0.0.1:$smallPort/v1/models").openConnection() as HttpURLConnection
+                c.setRequestProperty("Authorization", "Bearer secret")
+                c.readTimeout = 5000
+                assertEquals(503, c.responseCode)
+            }
+        } finally {
+            small.stop()
+        }
+    }
+
+    @Test
     fun badRequestsGetClearErrors() {
         assertEquals(400, call("POST", "/v1/chat/completions", "not json").status)
         assertEquals(400, call("POST", "/v1/chat/completions", """{"messages":[{"role":"system","content":"x"}]}""").status)

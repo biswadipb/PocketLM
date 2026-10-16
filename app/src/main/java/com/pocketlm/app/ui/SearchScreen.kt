@@ -1,7 +1,5 @@
 package com.pocketlm.app.ui
 
-import android.app.ActivityManager
-import android.content.Context
 import android.text.format.Formatter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -67,12 +65,7 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
     val gen by vm.generationParams.collectAsStateWithLifecycle()
     val source by vm.hubSource.collectAsStateWithLifecycle()
     val mirrorUrl by vm.mirrorUrl.collectAsStateWithLifecycle()
-    val searchContext = LocalContext.current
-    val memory = remember {
-        ActivityManager.MemoryInfo().also {
-            (searchContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(it)
-        }
-    }
+    val memory = rememberMemoryInfo()
     var query by rememberSaveable { mutableStateOf(state.query) }
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -158,13 +151,6 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun Hint(text: String) {
-    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

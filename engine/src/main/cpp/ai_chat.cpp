@@ -164,12 +164,24 @@ JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_setGrammar(JNIEnv *env, jobject /*unused*/, jstring jgrammar) {
     if (!g_model || !g_sampler) { return 1; }
     const auto *grammar = env->GetStringUTFChars(jgrammar, nullptr);
+    const std::string previous = g_grammar;
     g_grammar = grammar;
     env->ReleaseStringUTFChars(jgrammar, grammar);
 
+    // Build the replacement first: if the grammar is rejected, keep the working sampler as it was.
+    common_sampler *fresh = nullptr;
+    try {
+        fresh = new_sampler();
+    } catch (...) {
+        fresh = nullptr;
+    }
+    if (!fresh) {
+        g_grammar = previous;
+        return 2;
+    }
     common_sampler_free(g_sampler);
-    g_sampler = new_sampler();
-    return g_sampler ? 0 : 2;
+    g_sampler = fresh;
+    return 0;
 }
 
 static std::string get_backend() {
