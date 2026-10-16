@@ -14,13 +14,18 @@ import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelStore
+import com.pocketlm.app.data.Preset
+import com.pocketlm.app.data.Presets
 import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -93,6 +98,38 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             .putFloat(KEY_TEMP, params.temperature)
             .putFloat(KEY_TOP_P, params.topP)
             .apply()
+    }
+
+    private val _customPresets = MutableStateFlow(Presets.fromJson(prefs.getString(KEY_PRESETS, null)))
+    private val _selectedPresetId = MutableStateFlow(prefs.getString(KEY_PRESET_ID, null) ?: Presets.DEFAULT_ID)
+    val selectedPresetId = _selectedPresetId.asStateFlow()
+
+    /** Built-in presets followed by the user's own. */
+    val presets: StateFlow<List<Preset>> =
+        _customPresets.map { Presets.builtIn + it }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, Presets.builtIn)
+
+    private val selectedPrompt: String
+        get() = presets.value.firstOrNull { it.id == _selectedPresetId.value }?.prompt
+            ?: Presets.builtIn.first().prompt
+
+    /** Takes effect the next time a model loads or a new chat starts. */
+    fun selectPreset(id: String) {
+        _selectedPresetId.value = id
+        prefs.edit().putString(KEY_PRESET_ID, id).apply()
+    }
+
+    /** Adds a preset, or replaces the custom preset with the same id. */
+    fun savePreset(preset: Preset) {
+        _customPresets.update { list -> list.filterNot { it.id == preset.id } + preset }
+        prefs.edit().putString(KEY_PRESETS, Presets.toJson(_customPresets.value)).apply()
+    }
+
+    fun deletePreset(preset: Preset) {
+        if (preset.builtIn) return
+        _customPresets.update { list -> list.filterNot { it.id == preset.id } }
+        prefs.edit().putString(KEY_PRESETS, Presets.toJson(_customPresets.value)).apply()
+        if (_selectedPresetId.value == preset.id) selectPreset(Presets.DEFAULT_ID)
     }
 
     private var generationJob: Job? = null
@@ -177,7 +214,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 if (engine.state.value.isModelLoaded) engine.cleanUp()
                 awaitIdleEngine()
                 engine.loadModel(model.path, _generationParams.value)
-                engine.setSystemPrompt(SYSTEM_PROMPT)
+                engine.setSystemPrompt(selectedPrompt)
                 _loadedModel.value = model
                 if (resetChat) clearConversation()
             } catch (e: Exception) {
@@ -320,12 +357,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_THEME = "theme_mode"
+        const val KEY_PRESETS = "custom_presets"
+        const val KEY_PRESET_ID = "selected_preset"
         const val KEY_CTX = "gen_context_size"
         const val KEY_THREADS = "gen_threads"
         const val KEY_TEMP = "gen_temperature"
         const val KEY_TOP_P = "gen_top_p"
         val DEFAULT_PARAMS = GenerationParams()
         const val MAX_REPLAY_CHARS = 4000
-        const val SYSTEM_PROMPT = "You are PocketLM, a helpful assistant running entirely on the user's phone."
     }
 }
