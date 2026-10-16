@@ -17,7 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Models, Settings }
+private enum class Screen { Chat, History, Models, Search, Settings }
 
 @Composable
 fun PocketLmApp(vm: PocketViewModel = viewModel()) {
@@ -32,7 +32,9 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
         }
     }
 
-    BackHandler(enabled = screen != Screen.Chat) { screen = Screen.Chat }
+    BackHandler(enabled = screen != Screen.Chat) {
+        screen = if (screen == Screen.Search) Screen.Models else Screen.Chat
+    }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         val modifier = Modifier.padding(padding)
@@ -53,9 +55,11 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
             Screen.Models -> ModelsScreen(
                 vm,
                 onBack = { screen = Screen.Chat },
+                onOpenSearch = { screen = Screen.Search },
                 onModelLoaded = { screen = Screen.Chat },
                 modifier = modifier,
             )
+            Screen.Search -> SearchScreen(vm, onBack = { screen = Screen.Models }, modifier = modifier)
             Screen.Settings -> SettingsScreen(vm, onBack = { screen = Screen.Chat }, modifier = modifier)
         }
     }

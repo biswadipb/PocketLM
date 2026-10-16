@@ -12,6 +12,9 @@ import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.ChatStore
 import com.pocketlm.app.data.GenStats
+import com.pocketlm.app.data.HfClient
+import com.pocketlm.app.data.HfFile
+import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
@@ -38,6 +41,16 @@ data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val stats: GenStats? = null,
 )
+
+data class SearchState(
+    val query: String = "",
+    val loading: Boolean = false,
+    val searched: Boolean = false,
+    val results: List<HfModel> = emptyList(),
+)
+
+/** Files of one repository: null [files] while still loading. */
+data class RepoFiles(val files: List<HfFile>? = null, val error: String? = null)
 
 /** Download progress in 0..1, or null while the size is still unknown. */
 data class DownloadState(val progress: Float?)
@@ -178,6 +191,52 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    // ---- Hugging Face search ----------------------------------------------------
+
+    private val _search = MutableStateFlow(SearchState())
+    val search = _search.asStateFlow()
+
+    private val _repoFiles = MutableStateFlow<Map<String, RepoFiles>>(emptyMap())
+    val repoFiles = _repoFiles.asStateFlow()
+
+    private var searchJob: Job? = null
+
+    fun searchHub(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        searchJob?.cancel()
+        _search.value = SearchState(query = q, loading = true)
+        searchJob = viewModelScope.launch {
+            try {
+                val results = HfClient.search(q)
+                _search.value = SearchState(query = q, searched = true, results = results)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _search.value = SearchState(query = q, searched = true)
+                _error.value = "Search failed: ${e.message}"
+            }
+        }
+    }
+
+    fun loadRepoFiles(repoId: String) {
+        if (_repoFiles.value[repoId]?.files != null) return
+        _repoFiles.update { it + (repoId to RepoFiles()) }
+        viewModelScope.launch {
+            try {
+                val files = HfClient.files(repoId)
+                _repoFiles.update { it + (repoId to RepoFiles(files = files)) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _repoFiles.update { it + (repoId to RepoFiles(error = e.message ?: "Could not load files")) }
+            }
+        }
+    }
+
+    fun downloadFromHub(repoId: String, file: HfFile) =
+        startDownload(HfClient.downloadUrl(repoId, file.path), file.fileName)
 
     fun cancelDownload(fileName: String) {
         downloadJobs[fileName]?.cancel()

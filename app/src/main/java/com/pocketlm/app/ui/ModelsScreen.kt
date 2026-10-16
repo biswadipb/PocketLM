@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -49,6 +50,7 @@ import com.pocketlm.app.data.ModelCatalog
 fun ModelsScreen(
     vm: PocketViewModel,
     onBack: () -> Unit,
+    onOpenSearch: () -> Unit,
     onModelLoaded: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -107,6 +109,13 @@ fun ModelsScreen(
                     onDownload = { vm.download(c) },
                     onCancel = { vm.cancelDownload(c.fileName) },
                 )
+            }
+
+            item {
+                OutlinedButton(onClick = onOpenSearch, Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Search, contentDescription = null)
+                    Text("  Search Hugging Face")
+                }
             }
 
             item { SectionTitle("From a link") }
