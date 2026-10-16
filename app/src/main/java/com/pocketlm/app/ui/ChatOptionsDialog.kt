@@ -35,6 +35,7 @@ fun ChatOptionsDialog(
     onModel: (LocalModel) -> Unit,
     onPreset: (String?) -> Unit,
     onJsonMode: (Boolean) -> Unit,
+    onShareChat: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -70,6 +71,10 @@ fun ChatOptionsDialog(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Switch(checked = jsonMode, onCheckedChange = onJsonMode)
+                }
+                if (onShareChat != null) {
+                    Heading("Share")
+                    TextButton(onClick = onShareChat) { Text("Share this chat as text") }
                 }
                 Text(
                     "Changing the model or prompt reloads the model and replays this chat on your next message.",

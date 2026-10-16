@@ -32,6 +32,12 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Forgets the conversation so far and starts again with [systemPrompt]. Unlike [setSystemPrompt]
+     * this works at any time while a model is loaded and idle.
+     */
+    suspend fun resetConversation(systemPrompt: String)
+
+    /**
      * Constrains further output to a GBNF grammar (for example valid JSON), or lifts the
      * constraint when [gbnf] is empty. Call between messages.
      */

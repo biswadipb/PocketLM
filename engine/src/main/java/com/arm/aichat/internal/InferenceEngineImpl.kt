@@ -247,6 +247,25 @@ internal class InferenceEngineImpl private constructor(
         return generateReply { processUserPromptWithImage(message, imagePath, predictLength) }
     }
 
+    override suspend fun resetConversation(systemPrompt: String) {
+        withContext(llamaDispatcher) {
+            require(systemPrompt.isNotBlank()) { "Cannot process empty system prompt!" }
+            check(_state.value is InferenceEngine.State.ModelReady) {
+                "Cannot reset the conversation in ${_state.value.javaClass.simpleName}!"
+            }
+            _readyForSystemPrompt = false
+            _state.value = InferenceEngine.State.ProcessingSystemPrompt
+            val result = processSystemPrompt(systemPrompt)
+            if (result != 0) {
+                RuntimeException("Failed to reset the conversation: $result").also {
+                    _state.value = InferenceEngine.State.Error(it)
+                    throw it
+                }
+            }
+            _state.value = InferenceEngine.State.ModelReady
+        }
+    }
+
     override suspend fun setOutputGrammar(gbnf: String) {
         withContext(llamaDispatcher) {
             check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }

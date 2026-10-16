@@ -14,12 +14,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.PushPin
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.platform.LocalContext
+import com.pocketlm.app.data.ChatExport
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -86,6 +92,13 @@ fun HistoryScreen(
     val chats by vm.chats.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var renaming by remember { mutableStateOf<SavedChat?>(null) }
+    var saving by remember { mutableStateOf<SavedChat?>(null) }
+    val context = LocalContext.current
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        val chat = saving
+        saving = null
+        if (uri != null && chat != null) vm.saveChatTo(uri, chat)
+    }
     val rows = remember(chats, query) { buildRows(chats, query, System.currentTimeMillis()) }
 
     renaming?.let { chat ->
@@ -135,6 +148,15 @@ fun HistoryScreen(
                             onClick = { vm.openChat(row.chat); onOpened() },
                             onPin = { vm.togglePin(row.chat) },
                             onRename = { renaming = row.chat },
+                            onShare = {
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, row.chat.title)
+                                    putExtra(Intent.EXTRA_TEXT, vm.markdownFor(row.chat))
+                                }
+                                context.startActivity(Intent.createChooser(send, "Share chat"))
+                            },
+                            onSaveFile = { saving = row.chat; saver.launch(ChatExport.fileName(row.chat.title)) },
                             onDelete = { vm.deleteChat(row.chat) },
                         )
                     }
@@ -152,7 +174,15 @@ private fun Hint(text: String) {
 }
 
 @Composable
-private fun ChatRow(chat: SavedChat, onClick: () -> Unit, onPin: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
+private fun ChatRow(
+    chat: SavedChat,
+    onClick: () -> Unit,
+    onPin: () -> Unit,
+    onRename: () -> Unit,
+    onShare: () -> Unit,
+    onSaveFile: () -> Unit,
+    onDelete: () -> Unit,
+) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp, end = 0.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -169,8 +199,16 @@ private fun ChatRow(chat: SavedChat, onClick: () -> Unit, onPin: () -> Unit, onR
                     tint = if (chat.pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = onRename) { Icon(Icons.Filled.Edit, contentDescription = "Rename chat") }
-            IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete chat") }
+            var menuOpen by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "More actions") }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(text = { Text("Rename") }, onClick = { menuOpen = false; onRename() })
+                    DropdownMenuItem(text = { Text("Share") }, onClick = { menuOpen = false; onShare() })
+                    DropdownMenuItem(text = { Text("Save as file") }, onClick = { menuOpen = false; onSaveFile() })
+                    DropdownMenuItem(text = { Text("Delete") }, onClick = { menuOpen = false; onDelete() })
+                }
+            }
         }
     }
 }

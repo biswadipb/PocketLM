@@ -1,6 +1,10 @@
 package com.pocketlm.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.WindowManager
@@ -27,6 +31,8 @@ import kotlinx.coroutines.launch
 class MainActivity : FragmentActivity() {
 
     private val vm: PocketViewModel by viewModels()
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* the download notification just stays hidden if refused */ }
     private var stoppedAt = 0L
     private var promptShowing = false
 
@@ -45,6 +51,13 @@ class MainActivity : FragmentActivity() {
             }
         }
 
+        // Ask once for permission to show the download progress notification.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                vm.downloads.collect { if (it.isNotEmpty()) askForNotificationsOnce() }
+            }
+        }
+
         setContent {
             val mode by vm.themeMode.collectAsStateWithLifecycle()
             val locked by vm.locked.collectAsStateWithLifecycle()
@@ -56,6 +69,15 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    private fun askForNotificationsOnce() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        if (prefs.getBoolean("asked_notifications", false)) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        prefs.edit().putBoolean("asked_notifications", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     override fun onStop() {

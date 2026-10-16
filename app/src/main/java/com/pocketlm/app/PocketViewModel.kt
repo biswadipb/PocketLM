@@ -18,9 +18,13 @@ import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.Attachment
+import com.pocketlm.app.data.ApiBackend
+import com.pocketlm.app.data.ApiException
 import com.pocketlm.app.data.BenchResult
+import com.pocketlm.app.data.ChatRequest
 import com.pocketlm.app.data.Bm25Index
 import com.pocketlm.app.data.CatalogModel
+import com.pocketlm.app.data.ChatExport
 import com.pocketlm.app.data.ChatStore
 import com.pocketlm.app.data.DeviceStatus
 import com.pocketlm.app.data.DocumentStore
@@ -43,6 +47,7 @@ import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.Presets
 import com.pocketlm.app.data.PromptLibrary
 import com.pocketlm.app.data.SavedPrompt
+import com.pocketlm.app.data.Speaker
 import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +61,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
+import java.security.SecureRandom
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -113,8 +121,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val _loading = MutableStateFlow(false)
     val loading = _loading.asStateFlow()
 
-    private val _downloads = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
-    val downloads = _downloads.asStateFlow()
+    private val center = DownloadCenter.get(app)
+
+    /** Downloads in progress. They run outside this screen so they continue in the background. */
+    val downloads = center.downloads
 
     private val _error = MutableStateFlow<String?>(null)
     val error = _error.asStateFlow()
@@ -185,7 +195,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             _error.value = "Pick two different models."
             return
         }
-        if (_generating.value || _loading.value || _benchmarking.value || _comparing.value) return
+        if (_generating.value || _loading.value || _benchmarking.value || _comparing.value || _apiBusy.value) return
 
         val previous = _loadedModel.value
         val models = listOf(a, b)
@@ -298,7 +308,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Times prompt reading and reply speed for the loaded model. Takes a few seconds to a minute. */
     fun runBenchmark() {
         val model = _loadedModel.value ?: return
-        if (_benchmarking.value || _generating.value || _loading.value) return
+        if (_benchmarking.value || _generating.value || _loading.value || _apiBusy.value) return
         viewModelScope.launch {
             _benchmarking.value = true
             try {
@@ -419,6 +429,142 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _incomingText.value = null
     }
 
+    // ---- Local API server ------------------------------------------------------------
+
+    private val apiMutex = Mutex()
+    private val _apiBusy = MutableStateFlow(false)
+
+    /** True while the API server is answering a request, which uses the same model as the chat. */
+    val apiBusy = _apiBusy.asStateFlow()
+
+    private val _apiEnabled = MutableStateFlow(prefs.getBoolean(KEY_API_ENABLED, false))
+    val apiEnabled = _apiEnabled.asStateFlow()
+
+    val apiStatus = ApiGateway.status
+
+    private val _apiPort = MutableStateFlow(prefs.getInt(ApiService.KEY_PORT, ApiService.DEFAULT_PORT))
+    val apiPort = _apiPort.asStateFlow()
+
+    // A key always exists, so the server is never open to everyone on the network by accident.
+    private val _apiKey = MutableStateFlow(
+        prefs.getString(ApiService.KEY_API_KEY, null) ?: newApiKey().also { prefs.edit().putString(ApiService.KEY_API_KEY, it).apply() }
+    )
+    val apiKey = _apiKey.asStateFlow()
+
+    private fun newApiKey(): String {
+        val bytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        return "pk-" + bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    fun setApiEnabled(on: Boolean) {
+        _apiEnabled.value = on
+        prefs.edit().putBoolean(KEY_API_ENABLED, on).apply()
+        if (on) ApiService.start(getApplication()) else ApiService.stop(getApplication())
+    }
+
+    fun setApiPort(port: Int) {
+        if (port !in 1024..65535) {
+            _error.value = "Pick a port between 1024 and 65535."
+            return
+        }
+        _apiPort.value = port
+        prefs.edit().putInt(ApiService.KEY_PORT, port).apply()
+        if (_apiEnabled.value) {
+            ApiService.stop(getApplication())
+            ApiService.start(getApplication())
+        }
+    }
+
+    fun regenerateApiKey() {
+        val key = newApiKey()
+        _apiKey.value = key
+        prefs.edit().putString(ApiService.KEY_API_KEY, key).apply()
+    }
+
+    private val apiBackend = object : ApiBackend {
+        override fun modelNames() = listOfNotNull(_loadedModel.value?.fileName?.removeSuffix(".gguf"))
+        override suspend fun complete(request: ChatRequest, onToken: (String) -> Unit) = serveApiRequest(request, onToken)
+    }
+
+    private suspend fun awaitModelReady() {
+        withTimeoutOrNull(5_000) {
+            engine.state.first { it is InferenceEngine.State.ModelReady || it is InferenceEngine.State.Error }
+        }
+    }
+
+    /**
+     * Answers one API request with the loaded model. The model keeps no memory between API calls, so the
+     * earlier turns in the request are replayed inside the prompt. Afterwards the chat's own context is restored.
+     */
+    private suspend fun serveApiRequest(request: ChatRequest, onToken: (String) -> Unit): Int {
+        if (_loadedModel.value == null) throw ApiException(503, "No model is loaded. Load one in PocketLM first.")
+        if (_generating.value || _loading.value || _benchmarking.value || _comparing.value) {
+            throw ApiException(503, "PocketLM is busy with the chat. Try again in a moment.")
+        }
+        if (!apiMutex.tryLock()) throw ApiException(503, "Another API request is running. Try again in a moment.")
+        _apiBusy.value = true
+        try {
+            val system = request.messages.firstOrNull { it.role == "system" }?.content?.takeIf { it.isNotBlank() } ?: selectedPrompt
+            val turns = request.messages.filter { it.role != "system" }
+            val lastUser = turns.indexOfLast { it.role == "user" }
+            val question = turns[lastUser].content
+            if (question.isBlank()) throw ApiException(400, "The last user message is empty.")
+            val earlier = replayText(turns.take(lastUser).map { (it.role == "user") to it.content })
+            val prompt = if (earlier == null) question
+            else "Here is our earlier conversation:\n$earlier\n\nContinue from there. My new message: $question"
+
+            if (_jsonMode.value) engine.setOutputGrammar("")
+            engine.resetConversation(system)
+            var count = 0
+            engine.sendUserPrompt(prompt, request.maxTokens ?: InferenceEngine.DEFAULT_PREDICT_LENGTH).collect {
+                count++
+                onToken(it)
+            }
+            return count
+        } finally {
+            withContext(NonCancellable) {
+                try {
+                    awaitModelReady()
+                    engine.resetConversation(selectedPrompt)
+                    if (_jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
+                    pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+                } catch (e: Exception) {
+                    _error.value = "Could not restore the chat after an API request: ${e.message}"
+                }
+                _apiBusy.value = false
+                apiMutex.unlock()
+            }
+        }
+    }
+
+    // ---- Read aloud --------------------------------------------------------------
+
+    private val _speakingId = MutableStateFlow<String?>(null)
+
+    /** Id of the message being read aloud, or null. */
+    val speakingId = _speakingId.asStateFlow()
+
+    private val _readAloud = MutableStateFlow(prefs.getBoolean(KEY_READ_ALOUD, false))
+
+    /** Whether new replies are read aloud automatically when they finish. */
+    val readAloud = _readAloud.asStateFlow()
+
+    fun setReadAloud(on: Boolean) {
+        _readAloud.value = on
+        prefs.edit().putBoolean(KEY_READ_ALOUD, on).apply()
+        if (!on) stopSpeaking()
+    }
+
+    private val speaker by lazy {
+        Speaker(getApplication(), onSpeaking = { _speakingId.value = it }, onProblem = { _error.value = it })
+    }
+
+    fun speak(message: ChatMessage) = speaker.speak(message.id, message.text)
+
+    fun stopSpeaking() {
+        if (_speakingId.value != null) speaker.stop()
+    }
+
     // ---- Quick access (tile, widget, shortcut) -------------------------------------
 
     private val _askRequests = MutableStateFlow(0)
@@ -510,7 +656,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Reloads the engine (for a new model or prompt) and replays the chat on the next message. */
     private fun reloadKeepingChat(model: LocalModel? = _loadedModel.value) {
-        if (model == null || _generating.value || _loading.value || _benchmarking.value) return
+        if (model == null || _generating.value || _loading.value || _benchmarking.value || _apiBusy.value) return
         pendingContext = replayText(_messages.value.map { it.isUser to it.text })
         load(model, resetChat = false)
     }
@@ -535,7 +681,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var generationJob: Job? = null
-    private val downloadJobs = mutableMapOf<String, Job>()
+
+    fun reportError(message: String) {
+        _error.value = message
+    }
 
     fun dismissError() {
         _error.value = null
@@ -636,25 +785,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         startDownload(url, name)
     }
 
-    private fun startDownload(url: String, fileName: String) {
-        if (downloadJobs[fileName]?.isActive == true) return
-        _downloads.update { it + (fileName to DownloadState(null)) }
-        downloadJobs[fileName] = viewModelScope.launch {
-            try {
-                store.download(url, fileName) { done, total ->
-                    val p = if (total > 0) done.toFloat() / total else null
-                    _downloads.update { it + (fileName to DownloadState(p)) }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _error.value = "Download failed: ${e.message}"
-            } finally {
-                _downloads.update { it - fileName }
-                refreshModels()
-            }
-        }
-    }
+    private fun startDownload(url: String, fileName: String) = center.start(url, fileName)
 
     // ---- Hugging Face search ----------------------------------------------------
 
@@ -703,7 +834,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         startDownload(HfClient.downloadUrl(repoId, file.path), file.fileName)
 
     fun cancelDownload(fileName: String) {
-        downloadJobs[fileName]?.cancel()
+        center.cancel(fileName)
     }
 
     fun import(uri: Uri) {
@@ -732,7 +863,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
      * saved chat passes false so its messages stay on screen while the native context is rebuilt.
      */
     fun load(model: LocalModel, resetChat: Boolean = true) {
-        if (_loading.value || _benchmarking.value) return
+        if (_loading.value || _benchmarking.value || _apiBusy.value) return
         viewModelScope.launch {
             _loading.value = true
             try {
@@ -784,8 +915,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun send(text: String) {
         val image = _pendingImage.value
         val prompt = text.trim().ifEmpty { if (image != null) "Describe this image." else "" }
-        if (prompt.isEmpty() || _generating.value || _benchmarking.value || _loadedModel.value == null) return
+        if (prompt.isEmpty() || _generating.value || _benchmarking.value || _apiBusy.value || _loadedModel.value == null) return
 
+        stopSpeaking()
         if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
         _pendingImage.value = null
         _messages.update { it + ChatMessage(prompt, true, imagePath = image) }
@@ -890,6 +1022,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                         firstTokenMs = firstAt - start,
                     )
                     _messages.update { list -> list.dropLast(1) + list.last().copy(stats = stats) }
+                    if (_readAloud.value) _messages.value.lastOrNull()?.let(::speak)
                 }
                 saveCurrentChat()
             }
@@ -1016,6 +1149,39 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The open chat as Markdown, or null while it is empty. */
+    fun currentChatMarkdown(): String? {
+        val msgs = _messages.value.filter { it.isUser || it.text.isNotEmpty() }
+        val first = msgs.firstOrNull { it.isUser }?.text ?: return null
+        val title = _chats.value.firstOrNull { it.id == currentChatId }?.title
+            ?: first.lineSequence().first().take(48)
+        return ChatExport.toMarkdown(
+            title,
+            msgs.map { StoredMessage(it.text, it.isUser, it.stats, it.imagePath) },
+            _loadedModel.value?.fileName,
+            System.currentTimeMillis(),
+        )
+    }
+
+    fun markdownFor(chat: SavedChat): String =
+        ChatExport.toMarkdown(chat.title, chat.messages, chat.modelFile, chat.updatedAt)
+
+    /** Writes [chat] as a Markdown file to a location the user picked. */
+    fun saveChatTo(uri: Uri, chat: SavedChat) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use {
+                        it.write(markdownFor(chat).toByteArray())
+                    } ?: throw java.io.IOException("Cannot write to that location")
+                }
+                _error.value = "Chat saved"
+            } catch (e: Exception) {
+                _error.value = "Could not save the chat: ${e.message}"
+            }
+        }
+    }
+
     fun renameChat(chat: SavedChat, title: String) {
         val name = title.trim().ifEmpty { return }
         viewModelScope.launch {
@@ -1061,11 +1227,23 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        ApiGateway.backend = apiBackend
+        if (_apiEnabled.value) ApiService.start(getApplication())
         startDeviceMonitoring()
+        viewModelScope.launch {
+            center.events.collect { event ->
+                when (event) {
+                    is DownloadCenter.Event.Completed -> refreshModels()
+                    is DownloadCenter.Event.Failed -> _error.value = "Download failed: ${event.message}"
+                }
+            }
+        }
     }
 
     override fun onCleared() {
+        if (ApiGateway.backend === apiBackend) ApiGateway.backend = null
         stopDeviceMonitoring()
+        if (_speakingId.value != null || _readAloud.value) runCatching { speaker.shutdown() }
         stopGeneration()
         super.onCleared()
     }
@@ -1087,6 +1265,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_PROMPTS = "saved_prompts"
         const val KEY_BENCH = "benchmarks"
         const val KEY_LOCK = "app_lock"
+        const val KEY_READ_ALOUD = "read_aloud"
+        const val KEY_API_ENABLED = "api_enabled"
         const val MAX_BENCH_RESULTS = 20
         const val MAX_INCOMING_CHARS = 8000
         val DEFAULT_PARAMS = GenerationParams()

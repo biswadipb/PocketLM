@@ -11,13 +11,15 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Markdown rendering: headings, lists, bold, italic, inline code, and fenced code blocks with a copy button
 - Copy any reply, regenerate the latest one, or edit one of your messages and re-run from there
 - Saved prompts: reusable messages you can insert from the message box
+- Dictate a message with your phone's speech recogniser, and have replies read aloud (per reply, or automatically)
 - Share text into PocketLM from any app, or send selected text through the text selection menu
 - Open straight to the chat from a Quick Settings tile, a home-screen widget, or the app-icon shortcut
 - Per-chat options: pick the model and system prompt for just that chat, or restrict replies to valid JSON
 - Speed under each reply: tokens per second, token count, and time to first token
 
 **Models**
-- Built-in catalog of small models, resumable downloads, load / unload / delete
+- Built-in catalog of small models, load / unload / delete
+- Resumable downloads that keep going in the background, with a progress notification
 - Search Hugging Face for any GGUF model and download a specific quantisation
 - Paste a `.gguf` link or import a file from storage
 - Model details read from the GGUF header: parameters, architecture, quantisation, trained context length, layers, license
@@ -27,6 +29,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 
 **Conversations**
 - Chats are saved automatically; reopen, rename, pin, search and delete them from History
+- Share a chat as text, or save it as a Markdown file
 - Reopening a chat reloads its model and replays the recent conversation with your next message
 
 **Documents**
@@ -38,6 +41,17 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Attach a photo to a message when a vision model is loaded
 - Pair a vision add-on (`mmproj` file) with each model; the catalog includes SmolVLM 500M, which comes with its add-on
 - Hugging Face search lists vision add-ons next to models
+
+**Local API server**
+- Turn on an OpenAI-compatible server (`/v1/models`, `/v1/chat/completions`, with streaming) so other apps on your Wi-Fi can use the loaded model
+- Protected by an API key (sent as `Authorization: Bearer <key>`); the port is configurable
+- Serves one request at a time and restores your chat afterwards. Earlier turns in a request are replayed inside the prompt rather than through the model's chat template
+
+```bash
+curl http://PHONE_IP:8080/v1/chat/completions \
+  -H "Authorization: Bearer pk-your-key" -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Say hello"}]}'
+```
 
 **Settings**
 - Light, dark, or follow-system theme
@@ -54,6 +68,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - One image per message, shrunk to 1024 px on the long side; earlier images are not re-shown to the model after a chat is reopened or a reply is regenerated
 - Document search matches keywords, not meaning, so a question worded differently from the document may miss
 - Long document chats fill the context faster; raise the context length in Settings if needed
+- The API server is plain HTTP on your local network, so only enable it on a network you trust; it stops if Android closes the app, and the phone may sleep and drop requests
 - CPU only; no GPU or NPU acceleration yet
 
 ## Project layout
@@ -87,9 +102,7 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- Export and share whole chats
-- Local OpenAI-compatible API server
-- Voice input and read-aloud
+- Tool use (calculator, web search) and API features such as temperature per request
 - Semantic document search with an embedding model, and PDF support
 - GPU / NPU acceleration
 - Smaller release builds

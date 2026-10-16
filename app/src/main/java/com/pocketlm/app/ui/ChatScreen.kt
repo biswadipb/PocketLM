@@ -1,7 +1,16 @@
 package com.pocketlm.app.ui
 
 import androidx.compose.foundation.verticalScroll
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material.icons.filled.Tune
@@ -11,8 +20,6 @@ import com.pocketlm.app.data.SavedPrompt
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.remember
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.heightIn
@@ -92,16 +99,24 @@ fun ChatScreen(
     val incoming by vm.incomingText.collectAsStateWithLifecycle()
     val askRequests by vm.askRequests.collectAsStateWithLifecycle()
     val inputFocus = remember { FocusRequester() }
+    val speakingId by vm.speakingId.collectAsStateWithLifecycle()
     val deviceStatus by vm.deviceStatus.collectAsStateWithLifecycle()
     val presets by vm.presets.collectAsStateWithLifecycle()
     val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val jsonMode by vm.jsonMode.collectAsStateWithLifecycle()
     var showOptions by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val models by vm.models.collectAsStateWithLifecycle()
     val prompts by vm.prompts.collectAsStateWithLifecycle()
     var showPrompts by remember { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
+    val dictation = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val heard = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (result.resultCode == Activity.RESULT_OK && !heard.isNullOrBlank()) {
+            input = if (input.isBlank()) heard else input.trimEnd() + " " + heard
+        }
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::attach)
     }
@@ -129,6 +144,15 @@ fun ChatScreen(
             onModel = vm::switchModel,
             onPreset = vm::setChatPreset,
             onJsonMode = vm::setJsonMode,
+            onShareChat = if (messages.isEmpty()) null else ({
+                vm.currentChatMarkdown()?.let { md ->
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, md)
+                    }
+                    context.startActivity(Intent.createChooser(send, "Share chat"))
+                }
+            }),
             onDismiss = { showOptions = false },
         )
     }
@@ -231,6 +255,8 @@ fun ChatScreen(
                     items(messages, key = { it.id }) { message ->
                         MessageBubble(
                             message,
+                            speaking = speakingId == message.id,
+                            onSpeak = { if (speakingId == message.id) vm.stopSpeaking() else vm.speak(message) },
                             canEdit = message.isUser && !generating && !loading && loaded != null,
                             onEdit = { editing = message },
                             canRegenerate = message.id == messages.lastOrNull()?.id &&
@@ -300,6 +326,21 @@ fun ChatScreen(
                 enabled = loaded != null && !generating && !loading,
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
+                trailingIcon = {
+                    if (input.isEmpty() && loaded != null && !generating && !loading) {
+                        IconButton(onClick = {
+                            val ask = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message")
+                            }
+                            try {
+                                dictation.launch(ask)
+                            } catch (e: ActivityNotFoundException) {
+                                vm.reportError("No speech recognition app is installed on this phone.")
+                            }
+                        }) { Icon(Icons.Filled.Mic, contentDescription = "Dictate a message") }
+                    }
+                },
             )
             if (generating) {
                 IconButton(onClick = vm::stopGeneration) {
@@ -320,6 +361,8 @@ fun ChatScreen(
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    speaking: Boolean,
+    onSpeak: () -> Unit,
     canEdit: Boolean,
     onEdit: () -> Unit,
     canRegenerate: Boolean,
@@ -363,6 +406,12 @@ private fun MessageBubble(
                     Row {
                         IconButton(onClick = { clipboard.setText(AnnotatedString(message.text)) }) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message")
+                        }
+                        IconButton(onClick = onSpeak) {
+                            Icon(
+                                if (speaking) Icons.Filled.Stop else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (speaking) "Stop reading" else "Read aloud",
+                            )
                         }
                         if (canRegenerate) {
                             IconButton(onClick = onRegenerate) {

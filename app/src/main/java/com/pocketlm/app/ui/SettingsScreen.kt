@@ -16,6 +16,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import com.pocketlm.app.ApiStatus
+import com.pocketlm.app.data.LocalNetwork
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,6 +67,12 @@ fun SettingsScreen(
     val params by vm.generationParams.collectAsStateWithLifecycle()
     val stopWords by vm.stopWords.collectAsStateWithLifecycle()
     val lockEnabled by vm.lockEnabled.collectAsStateWithLifecycle()
+    val readAloud by vm.readAloud.collectAsStateWithLifecycle()
+    val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
+    val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
+    val apiPort by vm.apiPort.collectAsStateWithLifecycle()
+    val apiKey by vm.apiKey.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
     val presets by vm.presets.collectAsStateWithLifecycle()
     val selectedId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val maxThreads = Runtime.getRuntime().availableProcessors()
@@ -103,6 +114,81 @@ fun SettingsScreen(
                         Text(option.label, Modifier.padding(start = 12.dp))
                     }
                 }
+            }
+
+            SectionTitle("Local API server", Modifier.padding(top = 24.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Let other apps use this model")
+                    Text(
+                        "Starts an OpenAI-compatible server on this phone, so tools on your Wi-Fi can chat with the " +
+                            "loaded model. Keep PocketLM open with a model loaded.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = apiEnabled, onCheckedChange = vm::setApiEnabled)
+            }
+            if (apiEnabled) {
+                when (val status = apiStatus) {
+                    is ApiStatus.Running -> {
+                        val addresses = remember(status) { LocalNetwork.addresses() }
+                        Text(
+                            if (addresses.isEmpty()) "Running on port ${status.port}, but no Wi-Fi address was found."
+                            else "Running. Base URL:\n" + addresses.joinToString("\n") { "http://$it:${status.port}/v1" },
+                            Modifier.padding(top = 8.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    is ApiStatus.Failed -> Text(
+                        status.message, Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    ApiStatus.Stopped -> Text("Starting…", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                }
+                Text("API key", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelLarge)
+                Text(apiKey, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+                Row {
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(apiKey)) }) { Text("Copy key") }
+                    TextButton(onClick = vm::regenerateApiKey) { Text("New key") }
+                }
+                var portText by remember(apiPort) { mutableStateOf(apiPort.toString()) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = portText,
+                        onValueChange = { portText = it.filter(Char::isDigit).take(5) },
+                        label = { Text("Port") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = { portText.toIntOrNull()?.let(vm::setApiPort) },
+                        enabled = portText != apiPort.toString() && portText.isNotEmpty(),
+                    ) { Text("Apply") }
+                }
+                Text(
+                    "Send the key as an Authorization: Bearer header. Anyone on your network who has the key can use " +
+                        "your model, and the connection is not encrypted, so only use it on a network you trust.",
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            SectionTitle("Voice", Modifier.padding(top = 24.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Read replies aloud")
+                    Text(
+                        "Speak each reply when it finishes, using your phone's voice. " +
+                            "You can also tap the speaker on any reply. Code blocks are skipped.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = readAloud, onCheckedChange = vm::setReadAloud)
             }
 
             SectionTitle("Privacy", Modifier.padding(top = 24.dp))
