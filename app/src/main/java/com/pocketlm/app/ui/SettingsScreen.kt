@@ -224,6 +224,8 @@ fun SettingsScreen(
                 TextButton(onClick = { backupPicker.launch(arrayOf("application/zip", "application/octet-stream")) }) { Text("Restore") }
             }
 
+            SyncSection(vm)
+
             SectionTitle("Memory", Modifier.padding(top = 24.dp))
             Text(
                 "Unload the model after you stop using it, so its memory goes back to your phone. " +
@@ -489,7 +491,7 @@ private fun PresetDialog(initial: Preset, onSave: (Preset) -> Unit, onDismiss: (
 }
 
 @Composable
-private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
+internal fun SectionTitle(text: String, modifier: Modifier = Modifier) {
     Text(text, modifier, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
 }
 

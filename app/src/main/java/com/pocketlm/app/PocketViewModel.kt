@@ -33,7 +33,23 @@ import com.pocketlm.app.data.PromptRecord
 import com.pocketlm.app.data.PromptStep
 import com.pocketlm.app.data.Replay
 import com.pocketlm.app.data.Reply
+import com.pocketlm.app.data.SettingsSync
 import com.pocketlm.app.data.StatePolicy
+import com.pocketlm.app.data.FolderBackend
+import com.pocketlm.app.data.SyncConfigStore
+import com.pocketlm.app.data.SyncCrypto
+import com.pocketlm.app.data.SyncEngine
+import com.pocketlm.app.data.SyncException
+import com.pocketlm.app.data.SyncHeader
+import com.pocketlm.app.data.SyncKind
+import com.pocketlm.app.data.SyncNames
+import com.pocketlm.app.data.SyncOptions
+import com.pocketlm.app.data.SyncSettings
+import com.pocketlm.app.data.SyncState
+import com.pocketlm.app.data.SyncStateStore
+import com.pocketlm.app.data.SyncStatus
+import com.pocketlm.app.data.SyncTarget
+import com.pocketlm.app.data.checkAccess
 import com.pocketlm.app.data.Summaries
 import com.pocketlm.app.data.Turn
 import com.pocketlm.app.data.Variants
@@ -81,6 +97,7 @@ import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,6 +112,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
+import org.json.JSONObject
 import java.security.SecureRandom
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -264,6 +282,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _notes.update(change)
         prefs.edit().putString(KEY_NOTES, MemoryNotes.toJson(_notes.value)).apply()
         refreshSystemPrompt()
+        scheduleSettingsSync()
     }
 
     fun addNote(text: String) {
@@ -595,6 +614,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteAllChats() {
         viewModelScope.launch {
             _chats.value.forEach { chat ->
+                rememberDeletion(chat)
                 chatStore.delete(chat.id)
                 chat.attachments.forEach { docStore.delete(it.id) }
                 chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
@@ -604,6 +624,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             _loadedModel.value?.let { load(it) }
             refreshChats()
             refreshStorage()
+            scheduleSync()
         }
     }
 
@@ -786,20 +807,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                         ?: throw IOException("Cannot open that file")
                 }
                 var settingsApplied = 0
-                result.settings?.let { json ->
-                    val editor = prefs.edit()
-                    settingsApplied = SettingsBackup.apply(json, backupKeys) { key, value ->
-                        when (value) {
-                            is String -> editor.putString(key, value)
-                            is Int -> editor.putInt(key, value)
-                            is Float -> editor.putFloat(key, value)
-                            is Boolean -> editor.putBoolean(key, value)
-                        }
-                    }
-                    editor.apply()
-                    reloadSettings()
-                }
+                result.settings?.let { json -> settingsApplied = applySettings(json, backupKeys) }
                 refreshChats()
+                scheduleSync()
                 _error.value = buildString {
                     append("Restored ${result.chatsRestored} chats")
                     if (result.chatsKept > 0) append(" (${result.chatsKept} were already up to date)")
@@ -809,6 +819,22 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "Restore failed: ${e.message ?: e::class.simpleName}"
             }
         }
+    }
+
+    /** Writes the allowed settings from [json] into preferences and updates the screens. Returns how many were applied. */
+    private fun applySettings(json: JSONObject, allowed: Set<String>): Int {
+        val editor = prefs.edit()
+        val applied = SettingsBackup.apply(json, allowed) { key, value ->
+            when (value) {
+                is String -> editor.putString(key, value)
+                is Int -> editor.putInt(key, value)
+                is Float -> editor.putFloat(key, value)
+                is Boolean -> editor.putBoolean(key, value)
+            }
+        }
+        editor.apply()
+        reloadSettings()
+        return applied
     }
 
     /** Reads every backed-up setting from preferences again, after a restore changed them. */
@@ -836,6 +862,205 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _modelSettings.value = ModelSettingsStore.fromJson(prefs.getString(KEY_MODEL_SETTINGS, null))
         _notes.value = MemoryNotes.fromJson(prefs.getString(KEY_NOTES, null))
         _saveStates.value = prefs.getBoolean(KEY_SAVE_STATES, true)
+    }
+
+    // ---- Sync between devices ---------------------------------------------------------
+
+    /**
+     * The settings that sync when the user turns that on: what a person would want on every device. Per-phone choices
+     * (theme, threads, context size, background behaviour), model settings and everything secret (API key, app
+     * lock, hub and search addresses) stay out.
+     */
+    private val syncKeys = setOf(
+        KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED, KEY_STOP, KEY_PRESETS, KEY_PRESET_ID,
+        KEY_PROMPTS, KEY_TOOLS, KEY_READ_ALOUD, KEY_MAX_REPLY, KEY_NOTES, KEY_SAVE_STATES,
+    )
+
+    private val syncConfig = SyncConfigStore(app)
+    private val syncState = SyncStateStore(File(app.filesDir, "sync_state.json"))
+    private val syncMutex = Mutex()
+    private var syncDebounce: Job? = null
+    private var syncAgain = false
+
+    private val _sync = MutableStateFlow(SyncStatus())
+
+    /** What Settings shows about syncing: where to, when it last worked, and what went wrong. */
+    val syncStatus = _sync.asStateFlow()
+
+    private fun publishSyncStatus(running: Boolean = false, progress: String = "", connectError: String? = null) {
+        _sync.value = syncConfig.status(syncState.get().lastSyncAt).copy(running = running, progress = progress, connectError = connectError)
+    }
+
+    /**
+     * Connects this phone to a sync location. The first phone to use a location sets its passphrase (and must
+     * repeat it); phones that join later enter the same one. Nothing is stored unless the location can be written to.
+     */
+    fun connectSync(target: SyncTarget, passphrase: String, repeat: String) {
+        if (_sync.value.running) return
+        target.problem()?.let { publishSyncStatus(connectError = it); return }
+        if (passphrase.isEmpty()) { publishSyncStatus(connectError = "Enter a passphrase."); return }
+        viewModelScope.launch {
+            publishSyncStatus(running = true, progress = "Connecting")
+            try {
+                val app = getApplication<Application>()
+                val (header, key) = withContext(Dispatchers.IO) {
+                    val backend = target.open(app)
+                    backend.checkAccess()
+                    val existing = backend.get(SyncNames.HEADER)
+                    if (existing != null) {
+                        val header = SyncHeader.fromJson(String(existing, Charsets.UTF_8))
+                        val key = SyncCrypto.keyFor(header, passphrase.toCharArray())
+                            ?: throw SyncException("That passphrase does not match the one used for this sync location.")
+                        header to key
+                    } else {
+                        if (passphrase.length < MIN_PASSPHRASE) throw SyncException("Choose a passphrase of at least $MIN_PASSPHRASE characters.")
+                        if (passphrase != repeat) throw SyncException("The two passphrases are not the same.")
+                        val (header, key) = SyncCrypto.newHeader(passphrase.toCharArray())
+                        backend.put(SyncNames.HEADER, header.toJson().toByteArray())
+                        header to key
+                    }
+                }
+                val named = if (target.kind == SyncKind.Folder) {
+                    target.copy(folderName = withContext(Dispatchers.IO) { FolderBackend.displayName(app, Uri.parse(target.folderUri)) })
+                } else target
+                syncConfig.save(named, header, key)
+                // What the old location held says nothing about the new one; deletions made here still apply.
+                syncState.update { SyncState(tombstones = it.tombstones) }
+                publishSyncStatus()
+                runSync(manual = true)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                publishSyncStatus(connectError = "Could not connect: ${e.message ?: e::class.simpleName}")
+            }
+        }
+    }
+
+    fun disconnectSync() {
+        syncDebounce?.cancel()
+        syncConfig.clear()
+        syncState.update { SyncState(tombstones = it.tombstones) }
+        publishSyncStatus()
+        _error.value = "Sync is off. Your chats here and the files at the sync location were left as they are."
+    }
+
+    fun setSyncSettings(on: Boolean) {
+        syncConfig.setSyncSettings(on)
+        publishSyncStatus(_sync.value.running, _sync.value.progress)
+        if (on) scheduleSync(SYNC_SOON_MS)
+    }
+
+    fun setAutoSync(on: Boolean) {
+        syncConfig.setAutoSync(on)
+        publishSyncStatus(_sync.value.running, _sync.value.progress)
+    }
+
+    fun setSyncWifiOnly(on: Boolean) {
+        syncConfig.setWifiOnly(on)
+        publishSyncStatus(_sync.value.running, _sync.value.progress)
+    }
+
+    fun syncNow() = runSync(manual = true)
+
+    /** Syncs shortly after something changed, once the changes stop coming. */
+    private fun scheduleSync(delayMs: Long = SYNC_DEBOUNCE_MS) {
+        if (!syncConfig.configured || !syncConfig.autoSync) return
+        syncDebounce?.cancel()
+        syncDebounce = viewModelScope.launch {
+            delay(delayMs)
+            runSync(manual = false)
+        }
+    }
+
+    /** For changes to settings, presets, prompts and notes, which only matter when settings sync is on. */
+    private fun scheduleSettingsSync() {
+        if (syncConfig.syncSettings) scheduleSync()
+    }
+
+    private fun onMeteredOrOffline(): Boolean {
+        val manager = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
+        val caps = manager.getNetworkCapabilities(manager.activeNetwork) ?: return true
+        return !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
+
+    /** What the sync engine needs to know about the synced settings. */
+    private fun syncSettingsHandle() = object : SyncSettings {
+        override fun fingerprint() = SettingsSync.fingerprint(prefs.all, syncKeys)
+
+        override fun changedAt(): Long {
+            val file = File(getApplication<Application>().dataDir, "shared_prefs/settings.xml")
+            return file.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
+        }
+
+        override fun export() = SettingsBackup.toJson(prefs.all, syncKeys).toString()
+
+        override fun apply(json: String) {
+            applySettings(JSONObject(json), syncKeys)
+        }
+    }
+
+    /** One sync at a time. A request that arrives during a sync is run right after it, so no change is missed. */
+    private fun runSync(manual: Boolean) {
+        viewModelScope.launch {
+            if (!syncConfig.configured) return@launch
+            if (!manual && syncConfig.wifiOnly && onMeteredOrOffline()) return@launch
+            if (!syncMutex.tryLock()) {
+                syncAgain = true
+                return@launch
+            }
+            try {
+                val connection = syncConfig.load()
+                if (connection == null) {
+                    syncConfig.recordResult(null, "Sync needs to be set up again on this phone.")
+                    if (manual) _error.value = "Sync needs to be set up again on this phone."
+                    return@launch
+                }
+                publishSyncStatus(running = true, progress = "Starting")
+                val app = getApplication<Application>()
+                val job = currentCoroutineContext()[Job]
+                val options = SyncOptions(
+                    settings = if (syncConfig.syncSettings) syncSettingsHandle() else null,
+                    busyChatIds = setOfNotNull(currentChatId),
+                    onChatChanged = { id -> viewModelScope.launch { stateCache.delete(id) } },
+                    onProgress = { text -> _sync.update { it.copy(progress = text) } },
+                    cancelled = { job?.isActive == false },
+                )
+                val report = withContext(Dispatchers.IO) {
+                    val files = app.filesDir
+                    SyncEngine(
+                        File(files, "chats"), File(files, "images"), File(files, "docs"),
+                        connection.target.open(app), connection.header, connection.key, syncState,
+                    ).run(options)
+                }
+                val summary = report.summary()
+                syncConfig.recordResult(summary, null)
+                report.warnings.forEach { AppLog.note("Sync: $it") }
+                if (report.changedHere) refreshChats()
+                if (manual) _error.value = summary
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                val message = e.message ?: e::class.simpleName ?: "Unknown error"
+                syncConfig.recordResult(null, message)
+                AppLog.note("Sync failed: $message")
+                if (manual) _error.value = "Sync failed: $message"
+            } finally {
+                syncMutex.unlock()
+                publishSyncStatus()
+                if (syncAgain) {
+                    syncAgain = false
+                    scheduleSync(SYNC_SOON_MS)
+                }
+            }
+        }
+    }
+
+    /** The photo and document files at the sync location that belong to [chat], so a deletion can remove them. */
+    private fun remoteFilesOf(chat: SavedChat): List<String> =
+        chat.messages.mapNotNull { it.imagePath }.map { File(it).name }.filter(SyncNames::validImage).map(SyncNames::image) +
+            chat.attachments.map { it.id }.filter(SyncNames::validId).map(SyncNames::doc)
+
+    private suspend fun rememberDeletion(chat: SavedChat) {
+        if (!syncConfig.configured) return
+        withContext(Dispatchers.IO) { syncState.addTombstone(chat.id, System.currentTimeMillis(), remoteFilesOf(chat)) }
     }
 
     // ---- Conversation memory, cut-off replies, reply length ------------------------------
@@ -1041,12 +1266,14 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun savePrompt(title: String, text: String) {
         _customPrompts.update { it + SavedPrompt(UUID.randomUUID().toString(), title.trim(), text) }
         prefs.edit().putString(KEY_PROMPTS, PromptLibrary.toJson(_customPrompts.value)).apply()
+        scheduleSettingsSync()
     }
 
     fun deletePrompt(prompt: SavedPrompt) {
         if (prompt.builtIn) return
         _customPrompts.update { list -> list.filterNot { it.id == prompt.id } }
         prefs.edit().putString(KEY_PROMPTS, PromptLibrary.toJson(_customPrompts.value)).apply()
+        scheduleSettingsSync()
     }
 
     private val _stopWords = MutableStateFlow(prefs.getString(KEY_STOP, "") ?: "")
@@ -1163,6 +1390,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun savePreset(preset: Preset) {
         _customPresets.update { list -> list.filterNot { it.id == preset.id } + preset }
         prefs.edit().putString(KEY_PRESETS, Presets.toJson(_customPresets.value)).apply()
+        scheduleSettingsSync()
     }
 
     fun deletePreset(preset: Preset) {
@@ -1170,6 +1398,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _customPresets.update { list -> list.filterNot { it.id == preset.id } }
         prefs.edit().putString(KEY_PRESETS, Presets.toJson(_customPresets.value)).apply()
         if (_selectedPresetId.value == preset.id) selectPreset(Presets.DEFAULT_ID)
+        scheduleSettingsSync()
     }
 
     private var generationJob: Job? = null
@@ -2033,6 +2262,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             chatStore.save(chat)
             refreshChats()
+            scheduleSync()
         }
     }
 
@@ -2099,20 +2329,23 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun renameChat(chat: SavedChat, title: String) {
         val name = title.trim().ifEmpty { return }
         viewModelScope.launch {
-            chatStore.save(chat.copy(title = name.take(80), customTitle = true))
+            chatStore.save(chat.copy(title = name.take(80), customTitle = true, updatedAt = System.currentTimeMillis()))
             refreshChats()
+            scheduleSync()
         }
     }
 
     fun togglePin(chat: SavedChat) {
         viewModelScope.launch {
-            chatStore.save(chat.copy(pinned = !chat.pinned))
+            chatStore.save(chat.copy(pinned = !chat.pinned, updatedAt = System.currentTimeMillis()))
             refreshChats()
+            scheduleSync()
         }
     }
 
     fun deleteChat(chat: SavedChat) {
         viewModelScope.launch {
+            rememberDeletion(chat)
             chatStore.delete(chat.id)
             stateCache.delete(chat.id)
             chat.attachments.forEach { docStore.delete(it.id) }
@@ -2122,6 +2355,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _loadedModel.value?.let { load(it) }
             }
             refreshChats()
+            scheduleSync()
         }
     }
 
@@ -2139,6 +2373,14 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshModels()
         refreshChats()
+        publishSyncStatus()
+        if (syncConfig.configured && syncConfig.autoSync) {
+            // Give the app a moment to finish starting before the network is used.
+            viewModelScope.launch {
+                delay(SYNC_START_DELAY_MS)
+                runSync(manual = false)
+            }
+        }
         // Every message shown to the user is also written to the log, so a bug report includes it.
         viewModelScope.launch {
             _error.collect { message -> message?.let { AppLog.note("Shown to the user: $it") } }
@@ -2210,5 +2452,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val MAX_INCOMING_CHARS = 8000
         val DEFAULT_PARAMS = GenerationParams()
         const val MAX_REPLAY_CHARS = 4000
+        const val MIN_PASSPHRASE = 8
+        const val SYNC_DEBOUNCE_MS = 20_000L
+        const val SYNC_SOON_MS = 3_000L
+        const val SYNC_START_DELAY_MS = 5_000L
     }
 }

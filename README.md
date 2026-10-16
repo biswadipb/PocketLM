@@ -68,6 +68,12 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 **Settings**
 - Light, dark, or follow-system theme
 - Backup and restore: one zip with your chats (with photos and attached files), saved prompts, presets and settings; the API key, app lock and downloaded models are left out
+- Sync between devices (Settings, Sync): keeps your chats, with their photos and attached files, the same on all your devices. Pick where they go:
+  - a folder you choose with Android's folder picker, which works with Google Drive, Dropbox, OneDrive, Nextcloud, Syncthing and any other app that offers its files there
+  - a WebDAV folder (Nextcloud, ownCloud, a NAS), with a user name and app password
+  - S3-compatible storage (Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO) with an endpoint, bucket and access keys
+  
+  Everything is encrypted on the phone before it is uploaded (AES-256-GCM, key from your passphrase with PBKDF2-HMAC-SHA256, 600,000 rounds), so the service only sees scrambled files and file sizes. The first device chooses the passphrase, the others enter the same one. The passphrase is never stored or uploaded; the derived key and any passwords are kept only wrapped by the Android Keystore. Each chat is compared on its own and the more recently changed copy wins; a deleted chat leaves a small note so the deletion reaches your other devices too. Syncing runs when you tap Sync now, shortly after a chat is saved or changed, and when the app opens (automatic syncs can be limited to Wi-Fi). Optionally, generation settings, system prompts, saved prompts and memory notes sync too; the API key, app lock, model and hub settings, downloaded models and per-phone choices (theme, threads, context size) never do
 - Free memory when idle: unload the model after 5 to 60 minutes of inactivity; it loads again when you send a message (off by default)
 - Memory notes: facts about you ("I'm vegetarian", "I write Kotlin") that are added to every chat's system prompt while switched on; they are never sent to apps that use the local API server
 - Save each chat's state (on by default): faster reopening and waking, at the cost of cache storage (up to about 0.75 GB in all, which Android or "Clear cache" can take back)
@@ -82,6 +88,15 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 - Battery and heat warnings appear in the chat when the phone is warm or low on power
 
 ## Known limits
+
+- Sync is written and unit tested (encryption round trips, Signature V4 against Amazon's published examples, merging of conflicting chat sets, a fake WebDAV and S3 server, a real local HTTP server for GET/PUT/DELETE) but has never run on a device or against a real Drive, Dropbox, Nextcloud or S3 account. The folder picker backend (including how different storage apps handle file names and overwrites), WebDAV and S3 are all untested against real services
+- Sync conflicts are settled per chat by the time it was last changed on each phone, so a wrong phone clock can make an older edit win. If two phones change the same chat before either syncs, the later edit replaces the earlier one entirely; the chats are not merged message by message. A chat deleted on one phone and edited later on another comes back
+- Phones only learn about changes when they sync (see above); nothing polls in the background. An open chat is not replaced under you: it updates after you leave it
+- There is no lock on the sync location, so two phones syncing at the same moment can briefly write the index over each other. Each phone writes anything missing again on its next sync, so it settles by itself, but a file-sync app such as Dropbox may make "conflicted copy" files that PocketLM ignores
+- Changing the passphrase is not supported: turn sync off, then set it up again at a new, empty location with a new passphrase. A forgotten passphrase cannot be recovered
+- Deletions are remembered for 180 days; a phone that was off for longer may bring a deleted chat back. Restoring an old backup of a chat that was deleted elsewhere will have the deletion applied again at the next sync
+- WebDAV and S3 addresses must be https (Android blocks plain http), and a server with a self-signed certificate will not work. WebDAV sync only needs GET, PUT and DELETE, but creating a missing folder (MKCOL) and the folder listing (PROPFIND) are not standard on Android's HTTP client and are tried on a best-effort basis, so create the WebDAV folder yourself first. S3 requests are path-style; the access key needs permission to list, read, write and delete in the bucket
+- Sync does not carry the saved chat states (the model's memory of each chat); a synced chat is read in again the first time it is opened on another phone
 
 - Saved chat states, summaries, reply versions, the draft model and the assistant service are all written but untested on a device; speculative decoding in particular is new native code, so turn it off for a model that misbehaves
 - A draft model must share the main model's vocabulary (usually a smaller model of the same family), keeps a second model in memory, and is switched off while replies are restricted to JSON
@@ -136,7 +151,6 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- Sync chats between your devices through a cloud folder or a server you host
 - More tools
 - Semantic document search with an embedding model, and more OCR languages
 - GPU / NPU acceleration
