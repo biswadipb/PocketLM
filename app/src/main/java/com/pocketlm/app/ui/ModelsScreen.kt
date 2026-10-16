@@ -44,6 +44,7 @@ import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelCatalog
+import com.pocketlm.app.data.ModelInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,6 +59,7 @@ fun ModelsScreen(
     val loaded by vm.loadedModel.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
+    val infos by vm.modelInfo.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var url by rememberSaveable { mutableStateOf("") }
 
@@ -85,6 +87,7 @@ fun ModelsScreen(
             items(models, key = { it.path }) { m ->
                 LocalModelCard(
                     model = m,
+                    info = infos[m.path],
                     sizeText = Formatter.formatShortFileSize(context, m.sizeBytes),
                     isLoaded = loaded?.path == m.path,
                     busy = loading,
@@ -146,6 +149,7 @@ private fun SectionTitle(text: String) {
 @Composable
 private fun LocalModelCard(
     model: LocalModel,
+    info: ModelInfo?,
     sizeText: String,
     isLoaded: Boolean,
     busy: Boolean,
@@ -157,7 +161,23 @@ private fun LocalModelCard(
         Column(Modifier.padding(16.dp)) {
             Text(model.fileName, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.titleSmall)
-            Text(sizeText, style = MaterialTheme.typography.bodySmall)
+            Text(
+                listOfNotNull(sizeText, info?.summary?.takeIf { it.isNotEmpty() }).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            var showDetails by rememberSaveable { mutableStateOf(false) }
+            if (showDetails && info != null) {
+                Column(Modifier.padding(top = 8.dp)) {
+                    DetailRow("Name", info.name)
+                    DetailRow("Architecture", info.architecture)
+                    DetailRow("Parameters", info.parameters)
+                    DetailRow("Quantisation", info.quantisation)
+                    DetailRow("Trained context", info.contextLength?.let { "%,d tokens".format(it) })
+                    DetailRow("Layers", info.layers?.toString())
+                    DetailRow("Embedding size", info.embeddingSize?.toString())
+                    DetailRow("License", info.license)
+                }
+            }
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (isLoaded) {
                     Button(onClick = onUnload) { Text("Unload") }
@@ -168,8 +188,23 @@ private fun LocalModelCard(
                     Icon(Icons.Filled.Delete, contentDescription = null)
                     Text(" Delete")
                 }
+                if (info != null) {
+                    TextButton(onClick = { showDetails = !showDetails }) {
+                        Text(if (showDetails) "Hide details" else "Details")
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String?) {
+    if (value.isNullOrBlank()) return
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, Modifier.weight(1.4f), style = MaterialTheme.typography.bodySmall)
     }
 }
 

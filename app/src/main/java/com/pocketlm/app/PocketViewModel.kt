@@ -18,6 +18,7 @@ import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
+import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.Presets
@@ -155,8 +156,19 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _error.value = null
     }
 
+    private val _modelInfo = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
+
+    /** GGUF header details keyed by model path; filled in after the file list loads. */
+    val modelInfo = _modelInfo.asStateFlow()
+
     fun refreshModels() {
-        viewModelScope.launch { _models.value = store.list() }
+        viewModelScope.launch {
+            val list = store.list()
+            _models.value = list
+            list.filter { it.path !in _modelInfo.value }.forEach { m ->
+                ModelInfo.read(m.path)?.let { info -> _modelInfo.update { it + (m.path to info) } }
+            }
+        }
     }
 
     // ---- Model management -------------------------------------------------
