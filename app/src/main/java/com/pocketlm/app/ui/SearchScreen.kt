@@ -120,6 +120,7 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                     when (source) {
                         HubSource.HuggingFace -> "Search Hugging Face for GGUF models. Smaller quantised files (Q4) run best on phones."
                         HubSource.ModelScope -> "Search ModelScope for GGUF models. It is often faster to reach from mainland China."
+                        HubSource.Kaggle -> "Search Kaggle Models for GGUF models. Each quantisation is its own result. No account is needed for public models."
                         HubSource.Mirror -> "Enter the server's address above, then search."
                     }
                 )
@@ -169,11 +170,16 @@ private fun ModelCard(
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Column(Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
-                Text(model.id, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                Text(model.title ?: model.id, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "${compact(model.downloads)} downloads · ${compact(model.likes)} likes",
+                    if (model.downloads < 0) "${compact(model.likes)} votes"
+                    else "${compact(model.downloads)} downloads · ${compact(model.likes)} likes",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (model.title != null) {
+                    Text(model.id, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             if (open) {
                 Column(Modifier.padding(top = 8.dp)) {

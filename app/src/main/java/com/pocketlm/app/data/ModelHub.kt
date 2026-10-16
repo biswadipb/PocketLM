@@ -9,7 +9,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
-data class HfModel(val id: String, val downloads: Long, val likes: Long)
+/**
+ * A repository (or, on Kaggle, one model variation) that can be searched for and expanded into files.
+ * [downloads] is -1 when the source does not report it. [title] is shown instead of [id] when set.
+ */
+data class HfModel(val id: String, val downloads: Long, val likes: Long, val title: String? = null)
 
 data class HfFile(val path: String, val sizeBytes: Long) {
     val fileName: String get() = path.substringAfterLast('/')
@@ -30,6 +34,7 @@ data class HfFile(val path: String, val sizeBytes: Long) {
 enum class HubSource(val label: String) {
     HuggingFace("Hugging Face"),
     ModelScope("ModelScope"),
+    Kaggle("Kaggle"),
     Mirror("Custom address"),
 }
 
@@ -50,6 +55,7 @@ interface ModelHub {
         fun create(source: HubSource, mirrorUrl: String): ModelHub = when (source) {
             HubSource.HuggingFace -> HfHub("https://huggingface.co")
             HubSource.ModelScope -> ModelScopeHub()
+            HubSource.Kaggle -> KaggleHub()
             HubSource.Mirror -> HfHub(normaliseAddress(mirrorUrl) ?: throw IOException("Enter the mirror's address first"))
         }
 
@@ -174,6 +180,77 @@ class ModelScopeHub : ModelHub {
                 entries += HfFile(o.optString("Path"), o.optLong("Size"))
             }
             return ModelHub.usableFiles(entries)
+        }
+    }
+}
+
+/**
+ * Kaggle Models (kaggle.com/models). Public models need no account. Each model has several variations
+ * (often one per quantisation), and a download is a single file from one variation's current version, so
+ * every GGUF variation is listed as its own result with an id of `owner/model/gguf/variation/version`.
+ */
+class KaggleHub : ModelHub {
+
+    override suspend fun search(query: String): List<HfModel> = withContext(Dispatchers.IO) {
+        val q = query.trim().let { if (it.contains("gguf", ignoreCase = true)) it else "$it gguf" }
+        parseSearch(Http.request("$BASE/api/v1/models/list?search=${URLEncoder.encode(q, "UTF-8")}&pageSize=40"))
+    }
+
+    override suspend fun files(repoId: String): List<HfFile> = withContext(Dispatchers.IO) {
+        val p = parseId(repoId)
+        parseFiles(Http.request("$BASE/api/v1/models/${p.owner}/${p.model}/${p.framework}/${p.variation}/${p.version}/files"))
+    }
+
+    override fun downloadUrl(repoId: String, path: String): String {
+        val p = parseId(repoId)
+        val file = path.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+        return "$BASE/api/v1/models/${p.owner}/${p.model}/${p.framework}/${p.variation}/${p.version}/download/$file"
+    }
+
+    class Id(val owner: String, val model: String, val framework: String, val variation: String, val version: String)
+
+    companion object {
+        private const val BASE = "https://www.kaggle.com"
+        private const val MAX_RESULTS = 40
+
+        fun parseId(id: String): Id {
+            val parts = id.split('/')
+            if (parts.size != 5 || parts.any { it.isEmpty() }) throw IOException("Unexpected Kaggle model id: $id")
+            return Id(parts[0], parts[1], parts[2], parts[3], parts[4])
+        }
+
+        /** One result per GGUF variation; models with other frameworks only are left out. */
+        fun parseSearch(json: String): List<HfModel> {
+            val models = JSONObject(json).optJSONArray("models") ?: return emptyList()
+            val out = ArrayList<HfModel>()
+            for (i in 0 until models.length()) {
+                val m = models.getJSONObject(i)
+                val ref = m.optString("ref")
+                val instances = m.optJSONArray("instances") ?: continue
+                for (j in 0 until instances.length()) {
+                    val inst = instances.getJSONObject(j)
+                    if (!inst.optString("framework").equals("gguf", ignoreCase = true)) continue
+                    val variation = inst.optString("slug")
+                    val version = inst.optInt("versionNumber", 1)
+                    if (ref.isEmpty() || variation.isEmpty()) continue
+                    out += HfModel(
+                        id = "$ref/gguf/$variation/$version",
+                        downloads = -1,
+                        likes = m.optLong("voteCountNullable", m.optLong("voteCount")),
+                        title = "${m.optString("title", ref)} · $variation",
+                    )
+                    if (out.size >= MAX_RESULTS) return out
+                }
+            }
+            return out
+        }
+
+        fun parseFiles(json: String): List<HfFile> {
+            val files = JSONObject(json).optJSONArray("files") ?: return emptyList()
+            return ModelHub.usableFiles(List(files.length()) {
+                val f = files.getJSONObject(it)
+                HfFile(f.optString("name"), f.optLong("size"))
+            })
         }
     }
 }

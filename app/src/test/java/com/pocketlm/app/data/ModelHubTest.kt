@@ -70,4 +70,65 @@ class ModelHubTest {
         assertNull(ModelHub.normaliseAddress("   "))
         assertNull(ModelHub.normaliseAddress("https://"))
     }
+
+    // ---- Kaggle ----
+
+    private val kaggleSearch = """{"models":[
+        {"ref":"mistral-ai/magistral-small-2506-gguf","title":"Magistral Small 2506 gguf","voteCountNullable":3,
+         "instances":[{"slug":"magistral-small-2506_gguf","framework":"gguf","versionNumber":1}]},
+        {"ref":"dangkhoa2016/qwen3-vl-4b","title":"Qwen3-VL-4B","voteCountNullable":0,
+         "instances":[{"slug":"q4-k-m","framework":"gguf","versionNumber":2},
+                      {"slug":"f16","framework":"gguf","versionNumber":1},
+                      {"slug":"hf","framework":"transformers","versionNumber":1}]},
+        {"ref":"someone/not-gguf","title":"Other","voteCountNullable":9,
+         "instances":[{"slug":"default","framework":"pyTorch","versionNumber":1}]}
+    ],"nextPageToken":"x"}"""
+
+    @Test
+    fun kaggleSearchListsOneResultPerGgufVariation() {
+        val results = KaggleHub.parseSearch(kaggleSearch)
+        assertEquals(
+            listOf(
+                "mistral-ai/magistral-small-2506-gguf/gguf/magistral-small-2506_gguf/1",
+                "dangkhoa2016/qwen3-vl-4b/gguf/q4-k-m/2",
+                "dangkhoa2016/qwen3-vl-4b/gguf/f16/1",
+            ),
+            results.map { it.id },
+        )
+        assertEquals("Qwen3-VL-4B · q4-k-m", results[1].title)
+        assertEquals(3L, results[0].likes)
+        assertEquals(-1L, results[0].downloads)
+    }
+
+    @Test
+    fun kaggleFilesKeepOnlyGgufAndDropDocs() {
+        val json = """{"files":[
+            {"name":"Magistral-Small-2506.gguf","size":47153519680},
+            {"name":"Magistral-Small-2506_Q8_0.gguf","size":25054780480},
+            {"name":"README.md","size":5816},{"name":"SYSTEM_PROMPT.txt","size":819}],"nextPageToken":""}"""
+        assertEquals(
+            listOf("Magistral-Small-2506_Q8_0.gguf", "Magistral-Small-2506.gguf"),
+            KaggleHub.parseFiles(json).map { it.path },
+        )
+    }
+
+    @Test
+    fun kaggleDownloadUrlsPointAtOneFileAndEscapeNames() {
+        val id = "owner/model/gguf/q4-k-m/2"
+        assertEquals(
+            "https://www.kaggle.com/api/v1/models/owner/model/gguf/q4-k-m/2/download/my%20model.gguf",
+            KaggleHub().downloadUrl(id, "my model.gguf"),
+        )
+    }
+
+    @Test
+    fun kaggleIdsMustHaveFiveParts() {
+        assertEquals("q4-k-m", KaggleHub.parseId("owner/model/gguf/q4-k-m/2").variation)
+        try {
+            KaggleHub.parseId("owner/model")
+            org.junit.Assert.fail("expected an error")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!.contains("Unexpected Kaggle model id"))
+        }
+    }
 }
