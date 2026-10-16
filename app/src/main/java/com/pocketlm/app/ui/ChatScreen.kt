@@ -15,7 +15,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Stop
@@ -37,6 +39,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.ChatMessage
@@ -110,7 +114,14 @@ fun ChatScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(messages, key = { it.id }) { MessageBubble(it) }
+                    items(messages, key = { it.id }) { message ->
+                        MessageBubble(
+                            message,
+                            canRegenerate = message.id == messages.lastOrNull()?.id &&
+                                !message.isUser && !generating && !loading && messages.size >= 2,
+                            onRegenerate = vm::regenerate,
+                        )
+                    }
                 }
             }
         }
@@ -145,8 +156,9 @@ fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageBubble(message: ChatMessage, canRegenerate: Boolean, onRegenerate: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val clipboard = LocalClipboardManager.current
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start,
@@ -160,7 +172,7 @@ private fun MessageBubble(message: ChatMessage) {
                 CircularProgressIndicator(Modifier.padding(14.dp), strokeWidth = 2.dp)
             } else {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Text(message.text)
+                    if (message.isUser) Text(message.text) else MarkdownText(message.text)
                     message.stats?.let {
                         Text(
                             statsLine(it),
@@ -168,6 +180,16 @@ private fun MessageBubble(message: ChatMessage) {
                             style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSurfaceVariant,
                         )
+                    }
+                    Row {
+                        IconButton(onClick = { clipboard.setText(AnnotatedString(message.text)) }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message")
+                        }
+                        if (canRegenerate) {
+                            IconButton(onClick = onRegenerate) {
+                                Icon(Icons.Filled.Replay, contentDescription = "Regenerate reply")
+                            }
+                        }
                     }
                 }
             }

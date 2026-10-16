@@ -272,12 +272,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _loading.value = true
             try {
-                stopGeneration()
-                if (engine.state.value.isModelLoaded) engine.cleanUp()
-                awaitIdleEngine()
-                engine.loadModel(model.path, _generationParams.value)
-                engine.setSystemPrompt(selectedPrompt)
-                _loadedModel.value = model
+                loadIntoEngine(model)
                 if (resetChat) clearConversation()
             } catch (e: Exception) {
                 _loadedModel.value = null
@@ -286,6 +281,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _loading.value = false
             }
         }
+    }
+
+    private suspend fun loadIntoEngine(model: LocalModel) {
+        stopGeneration()
+        if (engine.state.value.isModelLoaded) engine.cleanUp()
+        awaitIdleEngine()
+        engine.loadModel(model.path, _generationParams.value)
+        engine.setSystemPrompt(selectedPrompt)
+        _loadedModel.value = model
     }
 
     fun unload() {
@@ -305,13 +309,50 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (prompt.isEmpty() || _generating.value || _loadedModel.value == null) return
 
         if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
+        _messages.update { it + ChatMessage(prompt, true) }
+        startGeneration(prompt)
+    }
+
+    /** Re-asks the last user message. The engine can't undo a reply, so its context is rebuilt first. */
+    fun regenerate() {
+        if (_generating.value || _loading.value) return
+        val model = _loadedModel.value ?: return
+        val msgs = _messages.value
+        if (msgs.size < 2 || msgs.last().isUser || !msgs[msgs.lastIndex - 1].isUser) return
+        val prompt = msgs[msgs.lastIndex - 1].text
+        val prior = msgs.dropLast(2)
+
+        viewModelScope.launch {
+            _loading.value = true
+            try {
+                loadIntoEngine(model)
+            } catch (e: Exception) {
+                _loadedModel.value = null
+                _error.value = "Could not reload ${model.fileName}: ${e.message ?: e::class.simpleName}"
+                return@launch
+            } finally {
+                _loading.value = false
+            }
+            _messages.value = prior + ChatMessage(prompt, true)
+            pendingContext = replayText(prior.map { it.isUser to it.text })
+            startGeneration(prompt)
+        }
+    }
+
+    private fun replayText(items: List<Pair<Boolean, String>>): String? =
+        items.takeIf { it.isNotEmpty() }
+            ?.joinToString("\n") { (isUser, text) -> (if (isUser) "User: " else "Assistant: ") + text }
+            ?.takeLast(MAX_REPLAY_CHARS)
+
+    /** Streams a reply to [prompt], which must already be the last message in the list. */
+    private fun startGeneration(prompt: String) {
         // After reopening a saved chat the engine has no memory of it, so replay it once.
         val enginePrompt = pendingContext?.let {
             "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $prompt"
         } ?: prompt
         pendingContext = null
 
-        _messages.update { it + ChatMessage(prompt, true) + ChatMessage("", false) }
+        _messages.update { it + ChatMessage("", false) }
         _generating.value = true
         generationJob = viewModelScope.launch {
             val start = SystemClock.elapsedRealtime()
@@ -387,9 +428,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         stopGeneration()
         currentChatId = chat.id
         _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats) }
-        pendingContext = chat.messages.joinToString("\n") {
-            (if (it.isUser) "User: " else "Assistant: ") + it.text
-        }.takeLast(MAX_REPLAY_CHARS)
+        pendingContext = replayText(chat.messages.map { it.isUser to it.text })
 
         val model = _models.value.firstOrNull { it.fileName == chat.modelFile } ?: _loadedModel.value
         if (model != null) {
