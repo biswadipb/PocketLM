@@ -73,26 +73,27 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstr
     return 0;
 }
 
-static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT_CONTEXT_SIZE) {
+static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT_CONTEXT_SIZE, const int requested_threads = 0) {
     if (!model) {
         LOGe("%s: model cannot be null", __func__);
         return nullptr;
     }
 
     // Multi-threading setup
-    const int n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
-                                                     (int) sysconf(_SC_NPROCESSORS_ONLN) -
-                                                     N_THREADS_HEADROOM));
+    const int n_cores = (int) sysconf(_SC_NPROCESSORS_ONLN);
+    const int n_threads = requested_threads > 0
+            ? std::min(requested_threads, n_cores)
+            : std::max(N_THREADS_MIN, std::min(N_THREADS_MAX, n_cores - N_THREADS_HEADROOM));
     LOGi("%s: Using %d threads", __func__, n_threads);
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
     const int trained_context_size = llama_model_n_ctx_train(model);
     if (n_ctx > trained_context_size) {
-        LOGw("%s: Model was trained with only %d context size! Enforcing %d context size...",
+        LOGw("%s: Model was trained with only %d context size! Clamping %d down to it.",
              __func__, trained_context_size, n_ctx);
     }
-    ctx_params.n_ctx = n_ctx;
+    ctx_params.n_ctx = std::min(n_ctx, trained_context_size);
     ctx_params.n_batch = BATCH_SIZE;
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
@@ -104,21 +105,23 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     return context;
 }
 
-static common_sampler *new_sampler(float temp) {
+static common_sampler *new_sampler(float temp, float top_p) {
     common_params_sampling sparams;
     sparams.temp = temp;
+    sparams.top_p = top_p;
     return common_sampler_init(g_model, sparams);
 }
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobject /*unused*/) {
-    auto *context = init_context(g_model);
+Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
+        JNIEnv * /*env*/, jobject /*unused*/, jint n_ctx, jint n_threads, jfloat temp, jfloat top_p) {
+    auto *context = init_context(g_model, n_ctx, n_threads);
     if (!context) { return 1; }
     g_context = context;
     g_batch = common_batch(context);
     g_chat_templates = common_chat_templates_init(g_model, "");
-    g_sampler = new_sampler(DEFAULT_SAMPLER_TEMP);
+    g_sampler = new_sampler(temp, top_p);
     return 0;
 }
 

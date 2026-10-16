@@ -16,9 +16,10 @@ interface InferenceEngine {
     /**
      * Load a model from the given path.
      *
+     * @param params context size, threads and sampling settings used for this session
      * @throws UnsupportedArchitectureException if model architecture not supported
      */
-    suspend fun loadModel(pathToModel: String)
+    suspend fun loadModel(pathToModel: String, params: GenerationParams = GenerationParams())
 
     /**
      * Sends a system prompt to the loaded model
@@ -70,6 +71,16 @@ interface InferenceEngine {
         const val DEFAULT_PREDICT_LENGTH = 1024
     }
 }
+
+/**
+ * Per-session generation settings. [threads] of 0 picks a sensible count for the device.
+ */
+data class GenerationParams(
+    val contextSize: Int = 4096,
+    val threads: Int = 0,
+    val temperature: Float = 0.7f,
+    val topP: Float = 0.95f,
+)
 
 val State.isUninterruptible
     get() = this is State.Initializing ||

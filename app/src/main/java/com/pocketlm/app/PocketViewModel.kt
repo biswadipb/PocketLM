@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
+import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.CatalogModel
@@ -71,6 +72,27 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun setThemeMode(mode: ThemeMode) {
         _themeMode.value = mode
         prefs.edit().putString(KEY_THEME, mode.name).apply()
+    }
+
+    private val _generationParams = MutableStateFlow(
+        GenerationParams(
+            contextSize = prefs.getInt(KEY_CTX, DEFAULT_PARAMS.contextSize),
+            threads = prefs.getInt(KEY_THREADS, DEFAULT_PARAMS.threads),
+            temperature = prefs.getFloat(KEY_TEMP, DEFAULT_PARAMS.temperature),
+            topP = prefs.getFloat(KEY_TOP_P, DEFAULT_PARAMS.topP),
+        )
+    )
+    val generationParams = _generationParams.asStateFlow()
+
+    /** Takes effect the next time a model is loaded (context size and threads are fixed per session). */
+    fun setGenerationParams(params: GenerationParams) {
+        _generationParams.value = params
+        prefs.edit()
+            .putInt(KEY_CTX, params.contextSize)
+            .putInt(KEY_THREADS, params.threads)
+            .putFloat(KEY_TEMP, params.temperature)
+            .putFloat(KEY_TOP_P, params.topP)
+            .apply()
     }
 
     private var generationJob: Job? = null
@@ -154,7 +176,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 stopGeneration()
                 if (engine.state.value.isModelLoaded) engine.cleanUp()
                 awaitIdleEngine()
-                engine.loadModel(model.path)
+                engine.loadModel(model.path, _generationParams.value)
                 engine.setSystemPrompt(SYSTEM_PROMPT)
                 _loadedModel.value = model
                 if (resetChat) clearConversation()
@@ -298,6 +320,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_THEME = "theme_mode"
+        const val KEY_CTX = "gen_context_size"
+        const val KEY_THREADS = "gen_threads"
+        const val KEY_TEMP = "gen_temperature"
+        const val KEY_TOP_P = "gen_top_p"
+        val DEFAULT_PARAMS = GenerationParams()
         const val MAX_REPLAY_CHARS = 4000
         const val SYSTEM_PROMPT = "You are PocketLM, a helpful assistant running entirely on the user's phone."
     }
