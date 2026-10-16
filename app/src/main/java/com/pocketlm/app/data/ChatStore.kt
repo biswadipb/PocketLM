@@ -18,6 +18,7 @@ data class SavedChat(
     val updatedAt: Long,
     val modelFile: String?,
     val messages: List<StoredMessage>,
+    val attachments: List<Attachment> = emptyList(),
 )
 
 /** Saves each conversation as a small JSON file in the app's private storage. */
@@ -39,6 +40,12 @@ class ChatStore(private val context: Context) {
             .put("title", chat.title)
             .put("updatedAt", chat.updatedAt)
             .put("modelFile", chat.modelFile ?: JSONObject.NULL)
+            .put(
+                "attachments",
+                JSONArray(chat.attachments.map {
+                    JSONObject().put("id", it.id).put("name", it.name).put("chars", it.chars)
+                }),
+            )
             .put(
                 "messages",
                 JSONArray(chat.messages.map { m ->
@@ -64,11 +71,16 @@ class ChatStore(private val context: Context) {
     private fun parse(text: String): SavedChat {
         val o = JSONObject(text)
         val arr = o.getJSONArray("messages")
+        val att = o.optJSONArray("attachments")
         return SavedChat(
             id = o.getString("id"),
             title = o.getString("title"),
             updatedAt = o.getLong("updatedAt"),
             modelFile = if (o.isNull("modelFile")) null else o.getString("modelFile"),
+            attachments = List(att?.length() ?: 0) {
+                val a = att!!.getJSONObject(it)
+                Attachment(a.getString("id"), a.getString("name"), a.optInt("chars"))
+            },
             messages = List(arr.length()) {
                 val m = arr.getJSONObject(it)
                 val stats = if (m.has("tokens")) {

@@ -9,8 +9,11 @@ import com.arm.aichat.AiChat
 import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
+import com.pocketlm.app.data.Attachment
+import com.pocketlm.app.data.Bm25Index
 import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.ChatStore
+import com.pocketlm.app.data.DocumentStore
 import com.pocketlm.app.data.GenStats
 import com.pocketlm.app.data.HfClient
 import com.pocketlm.app.data.HfFile
@@ -24,6 +27,7 @@ import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.Presets
 import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -34,6 +38,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class ChatMessage(
@@ -359,9 +364,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Streams a reply to [prompt], which must already be the last message in the list. */
     private fun startGeneration(prompt: String) {
         // After reopening a saved chat the engine has no memory of it, so replay it once.
+        val question = withDocumentContext(prompt)
         val enginePrompt = pendingContext?.let {
-            "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $prompt"
-        } ?: prompt
+            "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $question"
+        } ?: question
         pendingContext = null
 
         _messages.update { it + ChatMessage("", false) }
@@ -398,6 +404,51 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Document attachments (retrieval) -------------------------------------
+
+    private val docStore = DocumentStore(app)
+    private val _attachments = MutableStateFlow<List<Attachment>>(emptyList())
+    val attachments = _attachments.asStateFlow()
+    private var docIndex: Bm25Index? = null
+
+    fun attach(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val doc = docStore.import(uri)
+                _attachments.update { it + doc }
+                rebuildDocIndex()
+                if (_messages.value.isNotEmpty()) saveCurrentChat()
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Could not attach the file"
+            }
+        }
+    }
+
+    fun removeAttachment(doc: Attachment) {
+        viewModelScope.launch {
+            _attachments.update { list -> list.filterNot { it.id == doc.id } }
+            docStore.delete(doc.id)
+            rebuildDocIndex()
+            if (_messages.value.isNotEmpty()) saveCurrentChat()
+        }
+    }
+
+    private suspend fun rebuildDocIndex() {
+        val docs = _attachments.value.mapNotNull { a -> docStore.read(a.id)?.let { a.name to it } }
+        docIndex = if (docs.isEmpty()) null else withContext(Dispatchers.Default) { Bm25Index.build(docs) }
+    }
+
+    /** Wraps [question] with the most relevant excerpts from the attached documents, if any. */
+    private fun withDocumentContext(question: String): String {
+        val index = docIndex ?: return question
+        val budget = _generationParams.value.contextSize / 4 * 3 // ~3 chars per token, a quarter of the context
+        val hits = index.search(question, budget)
+        if (hits.isEmpty()) return question
+        val excerpts = hits.joinToString("\n\n") { "[${it.docName}]\n${it.text}" }
+        return "Answer using these excerpts from the user's attached documents. " +
+            "If they don't contain the answer, say so.\n\nExcerpts:\n$excerpts\n\nQuestion: $question"
+    }
+
     // ---- Chat history --------------------------------------------------------
 
     private val chatStore = ChatStore(app)
@@ -412,6 +463,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun clearConversation() {
+        if (_messages.value.isEmpty()) {
+            // Nothing was saved for this chat, so its attachments would be orphaned.
+            _attachments.value.forEach { a -> viewModelScope.launch { docStore.delete(a.id) } }
+        }
+        _attachments.value = emptyList()
+        docIndex = null
         currentChatId = null
         pendingContext = null
         _messages.value = emptyList()
@@ -427,6 +484,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             updatedAt = System.currentTimeMillis(),
             modelFile = _loadedModel.value?.fileName,
             messages = msgs.map { StoredMessage(it.text, it.isUser, it.stats) },
+            attachments = _attachments.value,
         )
         viewModelScope.launch {
             chatStore.save(chat)
@@ -441,6 +499,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         currentChatId = chat.id
         _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats) }
         pendingContext = replayText(chat.messages.map { it.isUser to it.text })
+        _attachments.value = chat.attachments
+        viewModelScope.launch { rebuildDocIndex() }
 
         val model = _models.value.firstOrNull { it.fileName == chat.modelFile } ?: _loadedModel.value
         if (model != null) {
@@ -453,6 +513,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteChat(chat: SavedChat) {
         viewModelScope.launch {
             chatStore.delete(chat.id)
+            chat.attachments.forEach { docStore.delete(it.id) }
             if (currentChatId == chat.id) {
                 clearConversation()
                 _loadedModel.value?.let { load(it) }
