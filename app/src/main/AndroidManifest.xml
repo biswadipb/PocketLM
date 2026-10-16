@@ -19,6 +19,7 @@
     </queries>
 
     <application
+        android:name=".PocketApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -70,6 +71,26 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Local OpenAI-compatible HTTP server the user turns on in Settings" />
         </service>
+
+        <!-- Lets PocketLM be picked as the phone's default assistant (Settings, Default apps) -->
+        <service
+            android:name=".PocketAssistService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".PocketAssistSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service
+            android:name=".PocketRecognitionService"
+            android:exported="false" />
 
         <service
             android:name=".QuickAskTileService"

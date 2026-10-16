@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -71,12 +72,30 @@ fun ModelsScreen(
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val projectorChoice by vm.projectorChoice.collectAsStateWithLifecycle()
     val gen by vm.generationParams.collectAsStateWithLifecycle()
+    val modelSettings by vm.modelSettings.collectAsStateWithLifecycle()
+    val presets by vm.presets.collectAsStateWithLifecycle()
+    val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
+    var settingsFor by remember { mutableStateOf<LocalModel?>(null) }
     val context = LocalContext.current
     val memory = rememberMemoryInfo(models)
     var url by rememberSaveable { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::import)
+    }
+
+    settingsFor?.let { model ->
+        ModelSettingsDialog(
+            model = model,
+            current = modelSettings[model.fileName],
+            appParams = gen,
+            presets = presets,
+            defaultPresetId = defaultPresetId,
+            otherModels = models.filter { it.path != model.path },
+            maxThreads = Runtime.getRuntime().availableProcessors(),
+            onSave = { vm.setModelSettings(model, it); settingsFor = null },
+            onDismiss = { settingsFor = null },
+        )
     }
 
     Column(modifier.fillMaxSize()) {
@@ -97,7 +116,13 @@ fun ModelsScreen(
                 item { Text("Nothing yet. Download a model below or import a .gguf file.") }
             }
             items(models, key = { it.path }) { m ->
-                val fit = MemoryEstimate.estimate(m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem)
+                val own = modelSettings[m.fileName]
+                // A draft model sits in memory beside this one, so it counts towards what is needed.
+                val draftBytes = own?.draftFile?.let { name -> models.firstOrNull { it.fileName == name }?.sizeBytes } ?: 0L
+                val fit = MemoryEstimate.estimate(
+                    m.sizeBytes + draftBytes, infos[m.path], own?.params?.contextSize ?: gen.contextSize,
+                    memory.availMem, memory.totalMem,
+                )
                 LocalModelCard(
                     model = m,
                     info = infos[m.path],
@@ -114,6 +139,8 @@ fun ModelsScreen(
                     projectors = projectors,
                     projector = projectorChoice[m.fileName],
                     onProjector = { vm.setProjector(m, it) },
+                    hasOwnSettings = own != null,
+                    onSettings = { settingsFor = m },
                 )
             }
             item {
@@ -189,6 +216,8 @@ private fun LocalModelCard(
     projectors: List<LocalModel>,
     projector: String?,
     onProjector: (String?) -> Unit,
+    hasOwnSettings: Boolean,
+    onSettings: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -258,6 +287,10 @@ private fun LocalModelCard(
                         Text(if (showDetails) "Hide details" else "Details")
                     }
                 }
+            }
+            TextButton(onClick = onSettings) {
+                Icon(Icons.Filled.Tune, contentDescription = null)
+                Text(if (hasOwnSettings) "  Settings for this model (custom)" else "  Settings for this model")
             }
             if (projectors.isNotEmpty()) {
                 var menuOpen by remember { mutableStateOf(false) }

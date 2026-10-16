@@ -72,7 +72,7 @@ fun StorageScreen(vm: PocketViewModel, onBack: () -> Unit, onOpenModels: () -> U
                     UsageRow("Chats", size(r.chatsBytes))
                     UsageRow("Photos", size(r.imagesBytes))
                     UsageRow("Attached documents", size(r.documentsBytes))
-                    UsageRow("Cache", size(r.cacheBytes))
+                    UsageRow("Cache (including saved chat states)", size(r.cacheBytes))
                 }
                 OutlinedButton(onClick = onOpenModels, Modifier.fillMaxWidth().padding(top = 16.dp)) {
                     Text("Manage models")
@@ -83,7 +83,7 @@ fun StorageScreen(vm: PocketViewModel, onBack: () -> Unit, onOpenModels: () -> U
                     )
                 }
                 Text(
-                    "Clean up clears the cache and removes photos and documents that no chat uses any more.",
+                    "Clean up clears the cache, including saved chat states (reopened chats are then read through once more), and removes photos and documents that no chat uses any more.",
                     Modifier.padding(top = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

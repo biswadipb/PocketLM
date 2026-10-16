@@ -17,7 +17,27 @@ import com.arm.aichat.AiChat
 import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
+import com.pocketlm.app.data.AppLog
+import com.pocketlm.app.data.ChatTemplates
+import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.Attachment
+import com.pocketlm.app.data.ChatState
+import com.pocketlm.app.data.ChatStateCache
+import com.pocketlm.app.data.JsonSchema
+import com.pocketlm.app.data.MemoryNotes
+import com.pocketlm.app.data.ModelSettings
+import com.pocketlm.app.data.ModelSettingsStore
+import com.pocketlm.app.data.Note
+import com.pocketlm.app.data.OtherReplies
+import com.pocketlm.app.data.PromptRecord
+import com.pocketlm.app.data.PromptStep
+import com.pocketlm.app.data.Replay
+import com.pocketlm.app.data.Reply
+import com.pocketlm.app.data.StatePolicy
+import com.pocketlm.app.data.Summaries
+import com.pocketlm.app.data.Turn
+import com.pocketlm.app.data.Variants
+import com.pocketlm.app.data.WebPage
 import com.pocketlm.app.data.BackupManager
 import com.arm.aichat.ContextUsage
 import com.pocketlm.app.data.ApiBackend
@@ -86,6 +106,11 @@ data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val stats: GenStats? = null,
     val imagePath: String? = null,
+    /** True for a summary that stands in for everything said before it. */
+    val summary: Boolean = false,
+    /** Earlier versions of this reply (from regenerating), and where the shown one sits among all of them. */
+    val others: List<Reply> = emptyList(),
+    val position: Int = 0,
 )
 
 data class SearchState(
@@ -182,6 +207,153 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             .apply()
     }
 
+    // ---- Settings that belong to one model ------------------------------------------
+
+    private val _modelSettings = MutableStateFlow(ModelSettingsStore.fromJson(prefs.getString(KEY_MODEL_SETTINGS, null)))
+
+    /** Each model's own settings, by file name. A model without an entry follows the app-wide settings. */
+    val modelSettings = _modelSettings.asStateFlow()
+
+    /** What applies while [model] is loaded: its own settings if it has them, with its chat template and draft model. */
+    private fun paramsFor(model: LocalModel): GenerationParams {
+        val own = _modelSettings.value[model.fileName]
+        val draft = own?.draftFile?.takeIf { it != model.fileName }
+            ?.let { name -> _models.value.firstOrNull { it.fileName == name }?.path }
+            .orEmpty()
+        return (own?.params ?: _generationParams.value)
+            .copy(chatTemplate = own?.chatTemplate.orEmpty(), draftModelPath = draft)
+    }
+
+    /** The context length that will be used for [model], for the memory estimate. */
+    fun contextFor(model: LocalModel): Int = paramsFor(model).contextSize
+
+    private fun presetOf(model: LocalModel?): String? = model?.let { _modelSettings.value[it.fileName]?.presetId }
+
+    /** Saves [settings] for [model], or makes it follow the app-wide settings again when null. */
+    fun setModelSettings(model: LocalModel, settings: ModelSettings?) {
+        val before = paramsFor(model)
+        val presetBefore = presetOf(model)
+        _modelSettings.update { map -> if (settings == null) map - model.fileName else map + (model.fileName to settings) }
+        prefs.edit().putString(KEY_MODEL_SETTINGS, ModelSettingsStore.toJson(_modelSettings.value)).apply()
+        if (_loadedModel.value?.fileName != model.fileName || _sleeping.value) return
+
+        val after = paramsFor(model)
+        if (presetBefore != presetOf(model)) refreshSystemPrompt()
+        // Temperature and top-p can change on the spot; the rest needs the model loaded again.
+        if (!anythingRunning()) {
+            viewModelScope.launch {
+                runCatching {
+                    awaitModelReady()
+                    engine.updateSampling(after.temperature, after.topP)
+                }
+            }
+        }
+        if (before.copy(temperature = 0f, topP = 0f) != after.copy(temperature = 0f, topP = 0f)) {
+            _error.value = "Saved. Load the model again for the other changes to apply."
+        }
+    }
+
+    // ---- Notes the model always remembers ---------------------------------------------
+
+    private val _notes = MutableStateFlow(MemoryNotes.fromJson(prefs.getString(KEY_NOTES, null)))
+
+    /** Facts about the user that are added to every chat's system prompt while switched on. */
+    val notes = _notes.asStateFlow()
+
+    private fun changeNotes(change: (List<Note>) -> List<Note>) {
+        _notes.update(change)
+        prefs.edit().putString(KEY_NOTES, MemoryNotes.toJson(_notes.value)).apply()
+        refreshSystemPrompt()
+    }
+
+    fun addNote(text: String) {
+        val clean = text.trim().take(MemoryNotes.MAX_NOTE_CHARS)
+        if (clean.isEmpty()) return
+        changeNotes { it + Note(UUID.randomUUID().toString(), clean) }
+    }
+
+    fun updateNote(note: Note, text: String) {
+        val clean = text.trim().take(MemoryNotes.MAX_NOTE_CHARS)
+        if (clean.isEmpty()) return
+        changeNotes { list -> list.map { if (it.id == note.id) it.copy(text = clean) else it } }
+    }
+
+    fun setNoteEnabled(note: Note, on: Boolean) {
+        changeNotes { list -> list.map { if (it.id == note.id) it.copy(enabled = on) else it } }
+    }
+
+    fun deleteNote(note: Note) {
+        changeNotes { list -> list.filterNot { it.id == note.id } }
+    }
+
+    /** Rebuilds the model's memory with the current system prompt and replays the open chat, when the model is idle. */
+    private fun refreshSystemPrompt() {
+        val model = _loadedModel.value ?: return
+        if (_sleeping.value || anythingRunning()) return
+        viewModelScope.launch {
+            try {
+                resetOrReload(model)
+                pendingContext = Replay.build(turns())
+            } catch (e: Exception) {
+                _error.value = "Could not update the model's instructions: ${e.message ?: e::class.simpleName}"
+            }
+        }
+    }
+
+    // ---- Saved chat state ---------------------------------------------------------------
+
+    private val stateCache = ChatStateCache(app)
+
+    private val _saveStates = MutableStateFlow(prefs.getBoolean(KEY_SAVE_STATES, true))
+
+    /** Whether the model's memory of each chat is saved, so reopening a chat does not mean reading it all again. */
+    val saveStates = _saveStates.asStateFlow()
+
+    fun setSaveStates(on: Boolean) {
+        _saveStates.value = on
+        prefs.edit().putBoolean(KEY_SAVE_STATES, on).apply()
+        if (!on) viewModelScope.launch { stateCache.clear() }
+    }
+
+    /** The open chat as the model should see it again: what is on screen, minus empty bubbles. */
+    private fun turns(messages: List<ChatMessage> = _messages.value): List<Turn> =
+        messages.filter { it.isUser || it.text.isNotEmpty() }.map { Turn(it.isUser, it.text, it.summary) }
+
+    /** Everything a saved state depends on: change any of it and the state no longer applies. */
+    private fun stateTag(model: LocalModel, history: List<Turn>): String {
+        val file = File(model.path)
+        val params = paramsFor(model)
+        return ChatState.tag(
+            ChatState.modelId(model.fileName, file.length(), file.lastModified()),
+            params.contextSize, params.chatTemplate, chatSystemPrompt, history,
+        )
+    }
+
+    /** Saves what the model remembers of the open chat, once a reply is finished. */
+    private fun saveChatState() {
+        if (!_saveStates.value) return
+        val id = currentChatId ?: return
+        val model = _loadedModel.value ?: return
+        val history = turns()
+        if (_sleeping.value || contextStale || pendingContext != null || history.none { it.isUser }) return
+        val used = engine.contextUsage().used
+        if (used <= 0) return
+        viewModelScope.launch {
+            if (!apiMutex.tryLock()) return@launch
+            try {
+                if (_generating.value || _loading.value || history != turns() || id != currentChatId) return@launch
+                awaitModelReady()
+                val result = engine.saveState(stateCache.prefix(id), stateTag(model, history), stateCache.maxBytes(), used)
+                if (result > 0) stateCache.trim(keep = id)
+                else if (result == InferenceEngine.STATE_TOO_BIG) stateCache.delete(id)
+            } catch (e: Exception) {
+                AppLog.note("Could not save the chat state: ${e.message}")
+            } finally {
+                apiMutex.unlock()
+            }
+        }
+    }
+
     // ---- Compare two models ---------------------------------------------------------
 
     private val _compare = MutableStateFlow<List<CompareSide>>(emptyList())
@@ -256,8 +428,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(NonCancellable) {
                     try {
                         if (previous != null) {
-                            loadIntoEngine(previous)
-                            pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+                            val restored = loadIntoEngine(previous, restoreFor = turns())
+                            pendingContext = if (restored) null else Replay.build(turns())
                         } else {
                             if (engine.state.value.isModelLoaded) engine.cleanUp()
                             _loadedModel.value = null
@@ -427,6 +599,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 chat.attachments.forEach { docStore.delete(it.id) }
                 chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
             }
+            stateCache.clear()
             clearConversation()
             _loadedModel.value?.let { load(it) }
             refreshChats()
@@ -524,21 +697,28 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (!apiMutex.tryLock()) throw ApiException(503, "Another API request is running. Try again in a moment.")
         _apiBusy.value = true
         touch()
-        val chatSampling = _generationParams.value
+        val chatSampling = _loadedModel.value?.let(::paramsFor) ?: _generationParams.value
         var changedSampling = false
         try {
-            if (!wakeIfAsleep()) throw ApiException(503, "The model could not be loaded again.")
+            if (!wakeIfAsleep(restore = false)) throw ApiException(503, "The model could not be loaded again.")
             val system = request.messages.firstOrNull { it.role == "system" }?.content?.takeIf { it.isNotBlank() } ?: selectedPrompt
             val turns = request.messages.filter { it.role != "system" }
             val lastUser = turns.indexOfLast { it.role == "user" }
             val question = turns[lastUser].content
             if (question.isBlank()) throw ApiException(400, "The last user message is empty.")
-            val earlier = replayText(turns.take(lastUser).map { (it.role == "user") to it.content })
+            val earlier = Replay.build(turns.take(lastUser).map { Turn(it.role == "user", it.content) })
             val prompt = if (earlier == null) question
             else "Here is our earlier conversation:\n$earlier\n\nContinue from there. My new message: $question"
 
-            if (_jsonMode.value) engine.setOutputGrammar("")
+            engine.setOutputGrammar("")
             engine.resetConversation(system)
+            if (request.jsonSchema != null) {
+                if (!engine.setOutputSchema(request.jsonSchema)) {
+                    throw ApiException(400, "response_format: the model could not use that schema")
+                }
+            } else if (request.jsonObject) {
+                engine.setOutputGrammar(JsonGrammar.gbnf)
+            }
             if (request.temperature != null || request.topP != null) {
                 engine.updateSampling(request.temperature ?: chatSampling.temperature, request.topP ?: chatSampling.topP)
                 changedSampling = true
@@ -556,8 +736,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     if (changedSampling) engine.updateSampling(chatSampling.temperature, chatSampling.topP)
                     engine.resetConversation(chatSystemPrompt)
                     refreshContextUsage()
-                    if (_jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
-                    pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+                    applyOutputConstraint()
+                    pendingContext = Replay.build(turns())
+                    contextStale = false
                 } catch (e: Exception) {
                     _error.value = "Could not restore the chat after an API request: ${e.message}"
                 }
@@ -574,7 +755,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val backupKeys = setOf(
         KEY_THEME, KEY_CTX, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
         KEY_STOP, KEY_PRESETS, KEY_PRESET_ID, KEY_PROMPTS, KEY_TOOLS, KEY_BG_REPLIES, KEY_READ_ALOUD, KEY_IDLE_MINUTES,
-        KEY_MAX_REPLY,
+        KEY_MAX_REPLY, KEY_MODEL_SETTINGS, KEY_NOTES, KEY_SAVE_STATES,
     )
 
     private fun backupManager(): BackupManager {
@@ -652,6 +833,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _readAloud.value = prefs.getBoolean(KEY_READ_ALOUD, false)
         _idleMinutes.value = prefs.getInt(KEY_IDLE_MINUTES, 0)
         _maxReplyTokens.value = prefs.getInt(KEY_MAX_REPLY, InferenceEngine.DEFAULT_PREDICT_LENGTH)
+        _modelSettings.value = ModelSettingsStore.fromJson(prefs.getString(KEY_MODEL_SETTINGS, null))
+        _notes.value = MemoryNotes.fromJson(prefs.getString(KEY_NOTES, null))
+        _saveStates.value = prefs.getBoolean(KEY_SAVE_STATES, true)
     }
 
     // ---- Conversation memory, cut-off replies, reply length ------------------------------
@@ -736,14 +920,19 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         refreshContextUsage()
     }
 
-    /** Reloads the model if it was put to sleep. Returns false (and reports why) if that fails. */
-    private suspend fun wakeIfAsleep(): Boolean {
+    /**
+     * Reloads the model if it was put to sleep, bringing back the chat's saved state when there is one (or
+     * replaying the chat otherwise). With [excludeLast] the newest message, which is about to be answered, is
+     * left out of that. Returns false (and reports why) if loading fails.
+     */
+    private suspend fun wakeIfAsleep(excludeLast: Boolean = false, restore: Boolean = true): Boolean {
         if (!_sleeping.value) return true
         val model = _loadedModel.value ?: run { _sleeping.value = false; return false }
         _loading.value = true
         return try {
-            loadIntoEngine(model)
-            pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+            val history = turns().let { if (excludeLast && it.lastOrNull()?.isUser == true) it.dropLast(1) else it }
+            val restored = loadIntoEngine(model, restoreFor = history.takeIf { restore })
+            pendingContext = if (restored) null else Replay.build(history)
             touch()
             true
         } catch (e: Exception) {
@@ -893,12 +1082,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     val jsonMode = _jsonMode.asStateFlow()
 
     private val selectedPrompt: String
-        get() = presets.value.firstOrNull { it.id == (_chatPresetId.value ?: _selectedPresetId.value) }?.prompt
-            ?: Presets.builtIn.first().prompt
+        get() {
+            // This chat's own choice wins, then the loaded model's, then the app-wide default.
+            val id = _chatPresetId.value ?: presetOf(_loadedModel.value) ?: _selectedPresetId.value
+            return presets.value.firstOrNull { it.id == id }?.prompt ?: Presets.builtIn.first().prompt
+        }
 
-    /** The preset's prompt plus, when tools are on, how to ask for them. */
+    /** The preset's prompt, then what to remember about the user, then (when tools are on) how to ask for them. */
     private val chatSystemPrompt: String
-        get() = Tools.withInstructions(selectedPrompt, _enabledTools.value)
+        get() = Tools.withInstructions(MemoryNotes.withNotes(selectedPrompt, _notes.value), _enabledTools.value)
 
     fun setChatPreset(id: String?) {
         _chatPresetId.value = id
@@ -912,20 +1104,52 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setJsonMode(on: Boolean) {
         _jsonMode.value = on
+        if (!on) _jsonSchema.value = null
+        applyConstraintNow()
+    }
+
+    private val _jsonSchema = MutableStateFlow<String?>(null)
+
+    /** A JSON Schema this chat's replies must follow, or null. */
+    val jsonSchema = _jsonSchema.asStateFlow()
+
+    /** Makes replies in this chat follow [schema] (a JSON Schema), or lifts that when null. */
+    fun setJsonSchema(schema: String?) {
+        val text = schema?.trim()?.takeIf { it.isNotEmpty() }
+        if (text != null) {
+            JsonSchema.problem(text)?.let { _error.value = it; return }
+        }
+        _jsonSchema.value = text
+        if (text != null) _jsonMode.value = true
+        applyConstraintNow()
+    }
+
+    private fun applyConstraintNow() {
         if (_loadedModel.value == null || _sleeping.value || _generating.value || _loading.value) return
         viewModelScope.launch {
             try {
-                engine.setOutputGrammar(if (on) JsonGrammar.gbnf else "")
+                applyOutputConstraint()
             } catch (e: Exception) {
                 _error.value = "Could not change JSON mode: ${e.message}"
             }
         }
     }
 
+    /** Applies this chat's JSON setting to the loaded model: its schema, plain JSON, or no restriction. */
+    private suspend fun applyOutputConstraint() {
+        val schema = _jsonSchema.value
+        if (schema != null && engine.setOutputSchema(schema)) return
+        if (schema != null) {
+            _jsonSchema.value = null
+            _error.value = "The model could not use that schema, so replies only have to be valid JSON."
+        }
+        engine.setOutputGrammar(if (_jsonMode.value) JsonGrammar.gbnf else "")
+    }
+
     /** Reloads the engine (for a new model or prompt) and replays the chat on the next message. */
     private fun reloadKeepingChat(model: LocalModel? = _loadedModel.value) {
         if (model == null || _generating.value || _loading.value || _benchmarking.value || _apiBusy.value) return
-        pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+        pendingContext = Replay.build(turns())
         load(model, resetChat = false)
     }
 
@@ -1186,13 +1410,14 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
      * Loads [model] into the engine. With [resetChat] the conversation is cleared too; opening a
      * saved chat passes false so its messages stay on screen while the native context is rebuilt.
      */
-    fun load(model: LocalModel, resetChat: Boolean = true) {
+    fun load(model: LocalModel, resetChat: Boolean = true, restore: Boolean = false) {
         if (_loading.value || _benchmarking.value || _apiBusy.value) return
         viewModelScope.launch {
             _loading.value = true
             try {
                 if (resetChat) clearConversation()
-                loadIntoEngine(model)
+                val restored = loadIntoEngine(model, restoreFor = turns().takeIf { restore })
+                if (restored) pendingContext = null
             } catch (e: Exception) {
                 _loadedModel.value = null
                 _error.value = "Could not load ${model.fileName}: ${e.message ?: e::class.simpleName}"
@@ -1202,12 +1427,27 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun loadIntoEngine(model: LocalModel, applyJson: Boolean = true) {
+    /**
+     * Loads [model] into the engine. When [restoreFor] (the chat as it stood) is given, the chat's saved state is
+     * brought back instead of reading the system prompt again; returns true if that worked.
+     */
+    private suspend fun loadIntoEngine(model: LocalModel, applyJson: Boolean = true, restoreFor: List<Turn>? = null): Boolean {
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         awaitIdleEngine()
-        engine.loadModel(model.path, _generationParams.value)
-        engine.setSystemPrompt(chatSystemPrompt)
+        engine.loadModel(model.path, paramsFor(model))
+
+        var restored = false
+        val chatId = currentChatId
+        if (restoreFor != null && restoreFor.isNotEmpty() && chatId != null && _saveStates.value) {
+            restored = try {
+                engine.restoreState(stateCache.prefix(chatId), stateTag(model, restoreFor))
+            } catch (e: Exception) {
+                false
+            }
+        }
+        if (!restored) engine.setSystemPrompt(chatSystemPrompt)
+        contextStale = false
         _loadedModel.value = model
         _sleeping.value = false
         touch()
@@ -1222,9 +1462,27 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "${projector.fileName} doesn't work with ${model.fileName}. Images are off."
             }
         }
-        if (applyJson && _jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
+        if (applyJson) applyOutputConstraint()
+        engine.draftStatus().takeIf { it.isNotEmpty() && !it.startsWith("Draft model on") }?.let { _error.value = it }
         refreshContextUsage()
+        return restored
     }
+
+    /** Starts the model's memory over with the current system prompt, without loading the model again. */
+    private suspend fun resetOrReload(model: LocalModel) {
+        if (_sleeping.value || !engine.state.value.isModelLoaded) {
+            loadIntoEngine(model)
+        } else {
+            stopGeneration()
+            awaitModelReady()
+            engine.resetConversation(chatSystemPrompt)
+            refreshContextUsage()
+        }
+        contextStale = false
+    }
+
+    /** True when the model's memory no longer matches the reply on screen (another version of it was chosen). */
+    private var contextStale = false
 
     fun unload() {
         _sleeping.value = false
@@ -1251,18 +1509,54 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _pendingImage.value = null
         _messages.update { it + ChatMessage(prompt, true, imagePath = image) }
         touch()
-        if (_sleeping.value) {
-            viewModelScope.launch { if (wakeIfAsleep()) startGeneration(prompt, image) }
+        if (_sleeping.value || contextStale) {
+            viewModelScope.launch { if (readyForMessage()) startGeneration(prompt, image) }
         } else {
             startGeneration(prompt, image)
         }
     }
 
+    /** Wakes the model, or rebuilds its memory, when it no longer matches the chat on screen. */
+    private suspend fun readyForMessage(): Boolean {
+        val model = _loadedModel.value ?: return false
+        if (_sleeping.value && !wakeIfAsleep(excludeLast = true)) return false
+        if (contextStale) {
+            _loading.value = true
+            try {
+                resetOrReload(model)
+                pendingContext = Replay.build(turns().dropLast(1))
+            } catch (e: Exception) {
+                _error.value = "Could not get the model ready: ${e.message ?: e::class.simpleName}"
+                return false
+            } finally {
+                _loading.value = false
+            }
+        }
+        return true
+    }
+
     /** Re-asks the last user message. The engine can't undo a reply, so its context is rebuilt first. */
     fun regenerate() {
         val msgs = _messages.value
-        if (msgs.size < 2 || msgs.last().isUser || !msgs[msgs.lastIndex - 1].isUser) return
-        rerunFrom(msgs.lastIndex - 1, msgs[msgs.lastIndex - 1].text)
+        if (msgs.size < 2 || msgs.last().isUser || msgs.last().summary || !msgs[msgs.lastIndex - 1].isUser) return
+        val last = msgs.last()
+        // The reply being replaced stays available as an earlier version.
+        val versions = if (last.text.isNotEmpty()) Variants.startNew(Reply(last.text, last.stats), OtherReplies(last.others, last.position)) else null
+        rerunFrom(msgs.lastIndex - 1, msgs[msgs.lastIndex - 1].text, versions)
+    }
+
+    /** Shows another version of the latest reply. The next message continues from the version shown. */
+    fun selectReply(id: String, target: Int) {
+        if (anythingRunning()) return
+        val message = _messages.value.lastOrNull() ?: return
+        if (message.id != id || message.isUser || message.summary) return
+        val (reply, versions) = Variants.select(Reply(message.text, message.stats), OtherReplies(message.others, message.position), target)
+        if (versions.position == message.position) return
+        stopSpeaking()
+        _messages.update { it.dropLast(1) + message.copy(text = reply.text, stats = reply.stats, others = versions.others, position = versions.position) }
+        _cutOffId.value = null
+        contextStale = true
+        saveCurrentChat()
     }
 
     /** Replaces one of your messages with [newText] and answers again, dropping everything after it. */
@@ -1274,7 +1568,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Rebuilds the engine context from the messages before [index], then answers [prompt] again. */
-    private fun rerunFrom(index: Int, prompt: String) {
+    private fun rerunFrom(index: Int, prompt: String, versions: OtherReplies? = null) {
         if (_generating.value || _loading.value) return
         val model = _loadedModel.value ?: return
         val msgs = _messages.value
@@ -1285,7 +1579,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _loading.value = true
             try {
-                loadIntoEngine(model)
+                resetOrReload(model)
             } catch (e: Exception) {
                 _loadedModel.value = null
                 _error.value = "Could not reload ${model.fileName}: ${e.message ?: e::class.simpleName}"
@@ -1295,27 +1589,37 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             }
             discardedImages.forEach { imageStore.delete(it) }
             _messages.value = prior + ChatMessage(prompt, true, imagePath = image)
-            pendingContext = replayText(prior.map { it.isUser to it.text })
+            pendingContext = Replay.build(turns(prior))
+            pendingVariants = versions
             startGeneration(prompt, image)
         }
     }
 
-    private fun replayText(items: List<Pair<Boolean, String>>): String? =
-        items.takeIf { it.isNotEmpty() }
-            ?.joinToString("\n") { (isUser, text) -> if (isUser) "User: $text" else "Assistant: ${Thinking.answerOnly(text)}" }
-            ?.takeLast(MAX_REPLAY_CHARS)
+    /** The earlier versions of the reply that is about to be regenerated. */
+    private var pendingVariants: OtherReplies? = null
 
     /** Streams a reply to [prompt], which must already be the last message in the list. */
     private fun startGeneration(prompt: String, imagePath: String? = null, continuing: Boolean = false) {
         _cutOffId.value = null
+        val carried = pendingVariants
+        pendingVariants = null
         // After reopening a saved chat the engine has no memory of it, so replay it once.
         val question = if (continuing) prompt else withDocumentContext(prompt)
+        val replayed = pendingContext != null
         val enginePrompt = pendingContext?.let {
             "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $question"
         } ?: question
         pendingContext = null
 
-        if (!continuing) _messages.update { it + ChatMessage("", false) }
+        val firstTitle = if (continuing) "Request to continue" else "Your message" +
+            (if (question != prompt) ", with excerpts from your documents" else "") +
+            (if (replayed) ", with the earlier conversation replayed" else "")
+        val systemText = chatSystemPrompt
+        val steps = ArrayList<PromptStep>()
+
+        if (!continuing) {
+            _messages.update { it + ChatMessage("", false, others = carried?.others.orEmpty(), position = carried?.position ?: 0) }
+        }
         _generating.value = true
         if (_backgroundReplies.value) {
             ReplyGateway.stopRequested = ::stopGeneration
@@ -1330,8 +1634,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             var count = 0
 
             /** Streams one model turn into the reply bubble after [base]; returns what the model wrote. */
-            suspend fun streamRound(prompt: String, image: String?, base: String): String {
+            suspend fun streamRound(prompt: String, image: String?, base: String, title: String): String {
                 var written = ""
+                var recorded = false
                 val reply = if (image != null && _visionReady.value) {
                     engine.sendUserPromptWithImage(prompt, image, _maxReplyTokens.value)
                 } else {
@@ -1339,6 +1644,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 try {
                     reply.collect { token ->
+                        if (!recorded) {
+                            // The model has read the message by now, so what it was given can be looked up.
+                            recorded = true
+                            steps += PromptStep(title, PromptRecord.clip(prompt), PromptRecord.clip(engine.lastPromptText()))
+                            _promptRecord.value = PromptRecord(systemText, steps.toList(), promptSettings())
+                        }
                         if (count == 0) firstAt = SystemClock.elapsedRealtime()
                         count++
                         if (count % 16 == 0) refreshContextUsage()
@@ -1362,7 +1673,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 var base = if (continuing) _messages.value.last().text else ""
                 var toolRounds = 0
                 while (true) {
-                    val written = streamRound(prompt, image, base)
+                    val written = streamRound(prompt, image, base, if (toolRounds == 0) firstTitle else "Result of a tool the model used")
                     val call = if (tools.isEmpty()) null else Tools.parseCall(written)
                     if (call == null || toolRounds >= Tools.MAX_ROUNDS) break
 
@@ -1387,9 +1698,16 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 refreshContextUsage()
                 ReplyService.stop(getApplication())
                 if (count == 0) {
-                    // Nothing was written (an error, or stopped before the first word): drop the empty bubble.
+                    // Nothing was written (an error, or stopped before the first word): drop the empty bubble,
+                    // and bring back the version of the reply it was going to replace.
                     _messages.update { list ->
-                        if (list.lastOrNull()?.let { !it.isUser && it.text.isEmpty() } == true) list.dropLast(1) else list
+                        val empty = list.lastOrNull()?.takeIf { !it.isUser && it.text.isEmpty() } ?: return@update list
+                        val earlier = Variants.restoreLast(OtherReplies(empty.others, empty.position))
+                        if (earlier == null) list.dropLast(1)
+                        else list.dropLast(1) + empty.copy(
+                            text = earlier.first.text, stats = earlier.first.stats,
+                            others = earlier.second.others, position = earlier.second.position,
+                        )
                     }
                 }
                 if (count > 0) {
@@ -1403,6 +1721,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     if (_readAloud.value) _messages.value.lastOrNull()?.let(::speak)
                 }
                 saveCurrentChat()
+                saveChatState()
                 if (count > 0 && !appVisible && _backgroundReplies.value) {
                     val chatTitle = _chats.value.firstOrNull { it.id == currentChatId }?.title
                         ?: _messages.value.firstOrNull { it.isUser }?.text?.lineSequence()?.first()?.take(48).orEmpty()
@@ -1410,6 +1729,185 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    // ---- Summarise and continue -----------------------------------------------------
+
+    private val _summarising = MutableStateFlow(false)
+
+    /** True while the chat is being condensed into a summary. */
+    val summarising = _summarising.asStateFlow()
+
+    /**
+     * Has the model condense the chat so far into a short summary, then carries on from that summary with the
+     * memory freed up. The earlier messages stay on screen; only what the model remembers becomes shorter.
+     */
+    fun summariseChat() {
+        val model = _loadedModel.value ?: return
+        if (anythingRunning()) return
+        val history = turns()
+        if (history.size < 2 || history.none { it.isUser }) return
+
+        stopSpeaking()
+        _cutOffId.value = null
+        val placeholder = ChatMessage("", false, summary = true)
+        // Treated like a reply, so Stop, the message box, the idle timer and the background notice all behave.
+        _generating.value = true
+        _summarising.value = true
+        if (_backgroundReplies.value) {
+            ReplyGateway.stopRequested = ::stopGeneration
+            ReplyService.start(getApplication())
+        }
+        generationJob = viewModelScope.launch {
+            var written = ""
+            var finished = false
+            try {
+                if (_sleeping.value && !wakeIfAsleep()) return@launch
+                _messages.update { it + placeholder }
+                touch()
+                val settings = paramsFor(model)
+                awaitModelReady()
+                if (_jsonMode.value || _jsonSchema.value != null) engine.setOutputGrammar("")
+                engine.updateSampling(0.3f, settings.topP)
+
+                val inPlace = !contextStale && pendingContext == null && Summaries.canSummariseInPlace(engine.contextUsage())
+                val request = if (inPlace) {
+                    Summaries.REQUEST
+                } else {
+                    // The model's memory is too full (or does not hold the chat): read the written chat instead.
+                    engine.resetConversation(Summaries.SYSTEM_PROMPT)
+                    val room = Summaries.transcriptChars(engine.contextUsage().total)
+                    Summaries.requestFor(Replay.build(history, room).orEmpty())
+                }
+                engine.sendUserPrompt(request, Summaries.REPLY_TOKENS).collect { token ->
+                    written += token
+                    val shown = Summaries.clean(written)
+                    _messages.update { list -> list.dropLast(1) + list.last().copy(text = shown) }
+                }
+                finished = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = "Summarising failed: ${e.message ?: e::class.simpleName}"
+            } finally {
+                withContext(NonCancellable) {
+                    val summary = Summaries.clean(written)
+                    val keep = finished && summary.isNotEmpty()
+                    if (finished && summary.isEmpty()) _error.value = "The model did not write a summary. Try again."
+                    _messages.update { list ->
+                        val last = list.lastOrNull()
+                        if (last?.id != placeholder.id) list
+                        else if (keep) list.dropLast(1) + last.copy(text = summary)
+                        else list.dropLast(1)
+                    }
+                    try {
+                        awaitModelReady()
+                        val settings = paramsFor(model)
+                        engine.updateSampling(settings.temperature, settings.topP)
+                        engine.resetConversation(chatSystemPrompt)
+                        applyOutputConstraint()
+                        // The next message starts from the summary (or from the whole chat, if summarising failed).
+                        pendingContext = Replay.build(turns())
+                        contextStale = false
+                    } catch (e: Exception) {
+                        _error.value = "Could not get the model ready again: ${e.message ?: e::class.simpleName}"
+                    }
+                    _generating.value = false
+                    _summarising.value = false
+                    ReplyService.stop(getApplication())
+                    touch()
+                    refreshContextUsage()
+                    if (keep) saveCurrentChat()
+                }
+            }
+        }
+    }
+
+    // ---- What the model was given ---------------------------------------------------
+
+    private val _promptRecord = MutableStateFlow<PromptRecord?>(null)
+
+    /** The system prompt and messages handed to the model for the latest reply. Kept in memory only. */
+    val promptRecord = _promptRecord.asStateFlow()
+
+    private fun promptSettings(): String {
+        val model = _loadedModel.value
+        val params = model?.let(::paramsFor) ?: _generationParams.value
+        val usage = engine.contextUsage()
+        return buildString {
+            append("Model: ").append(model?.fileName ?: "none").append("\n")
+            append("Memory used: ").append(ContextMeter.label(usage)).append("\n")
+            append("Temperature ").append("%.2f".format(params.temperature))
+            append(", top-p ").append("%.2f".format(params.topP))
+            append(", top-k ").append(params.topK)
+            append(", min-p ").append("%.2f".format(params.minP))
+            append(", repeat penalty ").append("%.2f".format(params.repeatPenalty)).append("\n")
+            append("Chat template: ").append(ChatTemplates.label(params.chatTemplate)).append("\n")
+            append("Reply limit: ").append(_maxReplyTokens.value).append(" tokens")
+            if (_jsonSchema.value != null) append("\nReplies follow a JSON schema")
+            else if (_jsonMode.value) append("\nReplies must be valid JSON")
+            engine.draftStatus().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
+        }
+    }
+
+    // ---- Web pages as documents ------------------------------------------------------
+
+    /** Fetches the page at [address] and attaches its text to the chat like a document. */
+    fun attachWebPage(address: String) {
+        if (_attachStatus.value != null) return
+        val url = WebPage.normalise(address)
+        if (url == null) {
+            _error.value = "That doesn't look like a web address."
+            return
+        }
+        viewModelScope.launch {
+            _attachStatus.value = "Reading the page…"
+            try {
+                val page = withContext(Dispatchers.IO) { WebPage.fetch(url) }
+                val name = page.title.replace(Regex("\\s+"), " ").take(48).ifBlank { "Web page" }
+                val doc = docStore.saveText(name, "Source: $url\n\n${page.text}")
+                _attachments.update { it + doc }
+                rebuildDocIndex()
+                if (_messages.value.isNotEmpty()) saveCurrentChat()
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Could not read that page"
+            } finally {
+                _attachStatus.value = null
+            }
+        }
+    }
+
+    // ---- Diagnostics -------------------------------------------------------------------
+
+    private val _diagnostics = MutableStateFlow<String?>(null)
+
+    /** A report for bug reports: device, app state, earlier exits, a crash if there was one, and the recent log. */
+    val diagnostics = _diagnostics.asStateFlow()
+
+    fun refreshDiagnostics() {
+        val model = _loadedModel.value
+        val details = buildString {
+            append("Model: ").append(model?.fileName ?: "none loaded")
+            if (_sleeping.value) append(" (unloaded to save memory)")
+            append("\n")
+            model?.let {
+                val p = paramsFor(it)
+                append("Context ").append(p.contextSize).append(", threads ").append(if (p.threads == 0) "auto" else p.threads.toString())
+                append(", template ").append(p.chatTemplate.ifEmpty { "automatic" }).append("\n")
+                engine.draftStatus().takeIf { s -> s.isNotEmpty() }?.let { s -> append(s).append("\n") }
+                append("Vision: ").append(if (_visionReady.value) "on" else "off").append("\n")
+            }
+            append("Engine state: ").append(engine.state.value.javaClass.simpleName).append("\n")
+            append("Saved chat states: ").append(if (_saveStates.value) "on" else "off")
+        }
+        viewModelScope.launch {
+            _diagnostics.value = withContext(Dispatchers.IO) { AppLog.report(getApplication(), details) }
+        }
+    }
+
+    fun clearCrashReport() {
+        AppLog.clearCrash()
+        refreshDiagnostics()
     }
 
     // ---- Document attachments (retrieval) -------------------------------------
@@ -1470,7 +1968,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Wraps [question] with the most relevant excerpts from the attached documents, if any. */
     private fun withDocumentContext(question: String): String {
         val index = docIndex ?: return question
-        val budget = _generationParams.value.contextSize / 4 * 3 // ~3 chars per token, a quarter of the context
+        val contextSize = engine.contextUsage().total.takeIf { it > 0 } ?: _generationParams.value.contextSize
+        val budget = contextSize / 4 * 3 // ~3 chars per token, a quarter of the context
         val hits = index.search(question, budget)
         if (hits.isEmpty()) return question
         val excerpts = hits.joinToString("\n\n") { "[${it.docName}]\n${it.text}" }
@@ -1500,12 +1999,18 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _cutOffId.value = null
         _chatPresetId.value = null
         _jsonMode.value = false
+        _jsonSchema.value = null
+        _promptRecord.value = null
+        contextStale = false
         _attachments.value = emptyList()
         docIndex = null
         currentChatId = null
         pendingContext = null
         _messages.value = emptyList()
     }
+
+    private fun stored(m: ChatMessage) =
+        StoredMessage(m.text, m.isUser, m.stats, m.imagePath, m.summary, m.others, m.position)
 
     private fun saveCurrentChat() {
         val id = currentChatId ?: return
@@ -1520,8 +2025,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             customTitle = existing?.customTitle ?: false,
             presetId = _chatPresetId.value,
             jsonMode = _jsonMode.value,
+            jsonSchema = _jsonSchema.value,
             modelFile = _loadedModel.value?.fileName,
-            messages = msgs.map { StoredMessage(it.text, it.isUser, it.stats, it.imagePath) },
+            messages = msgs.map(::stored),
             attachments = _attachments.value,
         )
         viewModelScope.launch {
@@ -1535,16 +2041,23 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (_loading.value) return
         stopGeneration()
         currentChatId = chat.id
-        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats, imagePath = it.imagePath) }
-        pendingContext = replayText(chat.messages.map { it.isUser to it.text })
+        _messages.value = chat.messages.map {
+            ChatMessage(
+                it.text, it.isUser, stats = it.stats, imagePath = it.imagePath,
+                summary = it.summary, others = it.others, position = it.position,
+            )
+        }
+        pendingContext = Replay.build(turns())
         _attachments.value = chat.attachments
         _chatPresetId.value = chat.presetId
         _jsonMode.value = chat.jsonMode
+        _jsonSchema.value = chat.jsonSchema
+        contextStale = false
         viewModelScope.launch { rebuildDocIndex() }
 
         val model = _models.value.firstOrNull { it.fileName == chat.modelFile } ?: _loadedModel.value
         if (model != null) {
-            load(model, resetChat = false)
+            load(model, resetChat = false, restore = true)
         } else {
             _error.value = "Load a model to continue this chat"
         }
@@ -1558,7 +2071,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             ?: first.lineSequence().first().take(48)
         return ChatExport.toMarkdown(
             title,
-            msgs.map { StoredMessage(it.text, it.isUser, it.stats, it.imagePath) },
+            msgs.map(::stored),
             _loadedModel.value?.fileName,
             System.currentTimeMillis(),
         )
@@ -1601,6 +2114,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteChat(chat: SavedChat) {
         viewModelScope.launch {
             chatStore.delete(chat.id)
+            stateCache.delete(chat.id)
             chat.attachments.forEach { docStore.delete(it.id) }
             chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
             if (currentChatId == chat.id) {
@@ -1625,6 +2139,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshModels()
         refreshChats()
+        // Every message shown to the user is also written to the log, so a bug report includes it.
+        viewModelScope.launch {
+            _error.collect { message -> message?.let { AppLog.note("Shown to the user: $it") } }
+        }
     }
 
     init {
@@ -1681,6 +2199,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_TOOLS = "enabled_tools"
         const val KEY_IDLE_MINUTES = "idle_minutes"
         const val KEY_MAX_REPLY = "max_reply_tokens"
+        const val KEY_MODEL_SETTINGS = "model_settings"
+        const val KEY_NOTES = "memory_notes"
+        const val KEY_SAVE_STATES = "save_chat_states"
         const val KEY_SEARCH_SERVER = "search_server"
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"

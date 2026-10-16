@@ -31,6 +31,10 @@ data class ChatRequest(
     val temperature: Float? = null,
     val topP: Float? = null,
     val stop: List<String> = emptyList(),
+    /** A JSON Schema the reply must follow (`response_format` of type `json_schema`), or null. */
+    val jsonSchema: String? = null,
+    /** True for `response_format` of type `json_object`: any valid JSON. */
+    val jsonObject: Boolean = false,
 )
 
 /** An error with the HTTP status the client should see. */
@@ -336,6 +340,11 @@ class ApiServer(
             is JSONArray -> (0 until s.length()).mapNotNull { s.optString(it).ifEmpty { null } }
             else -> emptyList()
         }.take(MAX_STOP_SEQUENCES)
+        val format = json.optJSONObject("response_format")
+        val schema = JsonSchema.fromResponseFormat(format)
+        if (schema != null) {
+            JsonSchema.problem(schema)?.let { throw ApiException(400, "response_format: $it") }
+        }
         return ChatRequest(
             messages = messages,
             stream = json.optBoolean("stream", false),
@@ -343,6 +352,8 @@ class ApiServer(
             temperature = (json.opt("temperature") as? Number)?.toFloat()?.coerceIn(0f, 2f),
             topP = (json.opt("top_p") as? Number)?.toFloat()?.coerceIn(0.01f, 1f),
             stop = stop,
+            jsonSchema = schema,
+            jsonObject = schema == null && JsonSchema.wantsJsonObject(format),
         )
     }
 

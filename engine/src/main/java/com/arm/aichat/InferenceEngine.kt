@@ -46,6 +46,26 @@ interface InferenceEngine {
     fun lastReplyWasCut(): Boolean
 
     /**
+     * The text most recently handed to the model (the system prompt or a message), with the chat template
+     * applied. For the prompt inspector.
+     */
+    fun lastPromptText(): String
+
+    /**
+     * Saves the model's memory of the conversation to files starting with [pathPrefix], labelled [tag].
+     * Returns the number of bytes written, [STATE_TOO_BIG] if that would exceed [maxBytes], or [STATE_FAILED]
+     * (also when the conversation no longer holds [expectedTokens] tokens, so a state is never saved under the
+     * label of a different conversation). Call between messages.
+     */
+    suspend fun saveState(pathPrefix: String, tag: String, maxBytes: Long, expectedTokens: Int): Long
+
+    /**
+     * Brings back a conversation saved with [saveState] under the same [tag], right after [loadModel].
+     * Returns false if there is nothing usable; the caller then sets a system prompt as usual.
+     */
+    suspend fun restoreState(pathPrefix: String, tag: String): Boolean
+
+    /**
      * Changes the temperature and top-p for further replies without reloading the model. Call between messages.
      */
     suspend fun updateSampling(temperature: Float, topP: Float)
@@ -55,6 +75,18 @@ interface InferenceEngine {
      * constraint when [gbnf] is empty. Call between messages.
      */
     suspend fun setOutputGrammar(gbnf: String)
+
+    /**
+     * Constrains further output to JSON that follows [jsonSchema] (a JSON Schema document).
+     * Returns false if the schema could not be used. Call between messages.
+     */
+    suspend fun setOutputSchema(jsonSchema: String): Boolean
+
+    /**
+     * Empty when no draft model was asked for; otherwise one line saying that speculative decoding is on
+     * (with how many of its guesses were right so far) or why it could not be used.
+     */
+    fun draftStatus(): String
 
     /**
      * Loads a multimodal projector (an "mmproj" GGUF) for the loaded model so it can read images.
@@ -110,6 +142,10 @@ interface InferenceEngine {
 
     companion object {
         const val DEFAULT_PREDICT_LENGTH = 1024
+
+        /** Results of [saveState] that are not a byte count. */
+        const val STATE_TOO_BIG = -1L
+        const val STATE_FAILED = -2L
     }
 }
 
@@ -126,6 +162,10 @@ data class GenerationParams(
     val repeatPenalty: Float = 1.0f,
     /** A negative seed means a different random seed every session. */
     val seed: Int = -1,
+    /** Name of a built-in chat template (for example "chatml") to use instead of the model's own; empty for its own. */
+    val chatTemplate: String = "",
+    /** Path of a small model that drafts tokens for the main one (speculative decoding); empty for none. */
+    val draftModelPath: String = "",
 )
 
 val State.isUninterruptible

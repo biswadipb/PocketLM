@@ -83,6 +83,13 @@ import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.GenStats
 import com.pocketlm.app.data.Thinking
+import com.pocketlm.app.data.PromptRecord
+import com.pocketlm.app.data.Variants
+import com.pocketlm.app.data.Summaries
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -113,7 +120,13 @@ fun ChatScreen(
     val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val jsonMode by vm.jsonMode.collectAsStateWithLifecycle()
+    val jsonSchema by vm.jsonSchema.collectAsStateWithLifecycle()
+    val summarising by vm.summarising.collectAsStateWithLifecycle()
+    val promptRecord by vm.promptRecord.collectAsStateWithLifecycle()
     var showOptions by remember { mutableStateOf(false) }
+    var showPromptRecord by remember { mutableStateOf(false) }
+    var showAttachMenu by remember { mutableStateOf(false) }
+    var showWebDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val models by vm.models.collectAsStateWithLifecycle()
     val prompts by vm.prompts.collectAsStateWithLifecycle()
@@ -149,9 +162,14 @@ fun ChatScreen(
             chatPresetId = chatPresetId,
             defaultPresetId = defaultPresetId,
             jsonMode = jsonMode,
+            jsonSchema = jsonSchema,
             onModel = vm::switchModel,
             onPreset = vm::setChatPreset,
             onJsonMode = vm::setJsonMode,
+            onJsonSchema = vm::setJsonSchema,
+            canSummarise = messages.size >= 2 && loaded != null && !generating && !loading,
+            onSummarise = { showOptions = false; vm.summariseChat() },
+            onShowPrompt = if (promptRecord == null) null else ({ showOptions = false; showPromptRecord = true }),
             onShareChat = if (messages.isEmpty()) null else ({
                 vm.currentChatMarkdown()?.let { md ->
                     val send = Intent(Intent.ACTION_SEND).apply {
@@ -162,6 +180,17 @@ fun ChatScreen(
                 }
             }),
             onDismiss = { showOptions = false },
+        )
+    }
+
+    if (showPromptRecord) {
+        promptRecord?.let { PromptInspectorDialog(it, onDismiss = { showPromptRecord = false }) }
+    }
+
+    if (showWebDialog) {
+        WebPageDialog(
+            onFetch = { vm.attachWebPage(it); showWebDialog = false },
+            onDismiss = { showWebDialog = false },
         )
     }
 
@@ -286,8 +315,10 @@ fun ChatScreen(
                             canEdit = message.isUser && !generating && !loading && loaded != null,
                             onEdit = { editing = message },
                             canRegenerate = message.id == messages.lastOrNull()?.id &&
-                                !message.isUser && !generating && !loading && messages.size >= 2,
+                                !message.isUser && !message.summary && !generating && !loading && messages.size >= 2,
                             onRegenerate = vm::regenerate,
+                            canPage = message.id == messages.lastOrNull()?.id && !generating && !loading,
+                            onPage = { target -> vm.selectReply(message.id, target) },
                         )
                     }
                 }
@@ -346,17 +377,32 @@ fun ChatScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (Summaries.worthOffering(usage, messages.size) && !generating && !loading && !summarising) {
+                    TextButton(onClick = vm::summariseChat) { Text("Summarise and continue") }
+                }
             }
         }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(
-                onClick = { picker.launch(arrayOf("*/*")) },
-                enabled = loaded != null && !generating && !loading,
-            ) {
-                Icon(Icons.Filled.AttachFile, contentDescription = "Attach a text file or image")
+            Box {
+                IconButton(
+                    onClick = { showAttachMenu = true },
+                    enabled = loaded != null && !generating && !loading,
+                ) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file, photo or web page")
+                }
+                DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("File or photo") },
+                        onClick = { showAttachMenu = false; picker.launch(arrayOf("*/*")) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Web page link") },
+                        onClick = { showAttachMenu = false; showWebDialog = true },
+                    )
+                }
             }
             IconButton(onClick = { showPrompts = true }, enabled = !generating && !loading) {
                 Icon(Icons.Filled.Bookmarks, contentDescription = "Saved prompts")
@@ -412,9 +458,15 @@ private fun MessageBubble(
     onEdit: () -> Unit,
     canRegenerate: Boolean,
     onRegenerate: () -> Unit,
+    canPage: Boolean,
+    onPage: (Int) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
+    if (message.summary) {
+        SummaryCard(message.text, onCopy = { clipboard.setText(AnnotatedString(message.text)) })
+        return
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start,
@@ -473,6 +525,18 @@ private fun MessageBubble(
                         if (canRegenerate) {
                             IconButton(onClick = onRegenerate) {
                                 Icon(Icons.Filled.Replay, contentDescription = "Regenerate reply")
+                            }
+                        }
+                    }
+                    if (canPage && message.others.isNotEmpty()) {
+                        val count = Variants.count(message.others)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { onPage(message.position - 1) }, enabled = message.position > 0) {
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Earlier version of this reply")
+                            }
+                            Text("${message.position + 1} / $count", style = MaterialTheme.typography.labelMedium)
+                            IconButton(onClick = { onPage(message.position + 1) }, enabled = message.position < count - 1) {
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Later version of this reply")
                             }
                         }
                     }
@@ -563,5 +627,91 @@ private fun PromptLibraryDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+/** The short summary that stands in for the messages above it when the model carries on. */
+@Composable
+private fun SummaryCard(text: String, onCopy: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                "Summary of the conversation up to here",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            if (text.isEmpty()) {
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("  Summarising…", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                Text(text, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onTertiaryContainer)
+                Text(
+                    "The model carries on from this summary. The messages above stay here for you to read.",
+                    Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                IconButton(onClick = onCopy) { Icon(Icons.Filled.ContentCopy, contentDescription = "Copy summary") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebPageDialog(onFetch: (String) -> Unit, onDismiss: () -> Unit) {
+    var address by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Attach a web page") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("Web address") },
+                    placeholder = { Text("https://…") },
+                    singleLine = true,
+                )
+                Text(
+                    "PocketLM downloads the page from this phone and keeps its text with the chat, like an attached file. " +
+                        "The site can see your request, as with any link you open.",
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onFetch(address) }, enabled = address.isNotBlank()) { Text("Attach") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Shows exactly what the model was given for the latest reply, to help work out why it answered as it did. */
+@Composable
+private fun PromptInspectorDialog(record: PromptRecord, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    val text = remember(record) { record.asText() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("What the model received") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(
+                        text,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(text)) }) { Text("Copy") } },
     )
 }

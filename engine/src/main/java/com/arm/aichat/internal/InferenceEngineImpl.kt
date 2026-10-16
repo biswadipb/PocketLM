@@ -99,6 +99,15 @@ internal class InferenceEngineImpl private constructor(
     private external fun setGrammar(grammar: String): Int
 
     @FastNative
+    private external fun setSchemaGrammar(schema: String): Int
+
+    private external fun applyChatTemplate(name: String): Int
+
+    private external fun attachDraft(path: String): Int
+
+    private external fun draftSummary(): String
+
+    @FastNative
     private external fun setSampling(temperature: Float, topP: Float): Int
 
     @FastNative
@@ -109,6 +118,13 @@ internal class InferenceEngineImpl private constructor(
 
     @FastNative
     private external fun lastReplyCut(): Boolean
+
+    @FastNative
+    private external fun lastPrompt(): String
+
+    private external fun saveChatState(pathPrefix: String, tag: String, maxBytes: Long, expectedTokens: Int): Long
+
+    private external fun restoreChatState(pathPrefix: String, tag: String): Int
 
     @FastNative
     private external fun loadProjector(path: String): Int
@@ -142,6 +158,8 @@ internal class InferenceEngineImpl private constructor(
     override val state: StateFlow<InferenceEngine.State> = _state.asStateFlow()
 
     private var _readyForSystemPrompt = false
+    private var draftWanted = false
+    private var draftProblem = ""
     @Volatile
     private var _cancelGeneration = false
 
@@ -204,6 +222,22 @@ internal class InferenceEngineImpl private constructor(
                 }
                 Log.i(TAG, "Model loaded!")
                 _readyForSystemPrompt = true
+
+                if (params.chatTemplate.isNotBlank()) {
+                    val result = applyChatTemplate(params.chatTemplate)
+                    if (result != 0) Log.w(TAG, "Chat template '${params.chatTemplate}' not used, code $result")
+                }
+                draftProblem = ""
+                draftWanted = params.draftModelPath.isNotBlank()
+                if (draftWanted) {
+                    draftProblem = when (attachDraft(params.draftModelPath)) {
+                        0 -> ""
+                        3 -> "The draft model does not use the same vocabulary as this model, so it was not used."
+                        4 -> "This kind of model cannot use a draft model."
+                        2 -> "The draft model could not be loaded."
+                        else -> "The draft model could not be set up."
+                    }
+                }
 
                 _cancelGeneration = false
                 _state.value = InferenceEngine.State.ModelReady
@@ -286,6 +320,42 @@ internal class InferenceEngineImpl private constructor(
 
     override fun lastReplyWasCut(): Boolean = _state.value.isModelLoaded && lastReplyCut()
 
+    override fun lastPromptText(): String = if (_state.value.isModelLoaded) lastPrompt() else ""
+
+    override suspend fun saveState(pathPrefix: String, tag: String, maxBytes: Long, expectedTokens: Int): Long =
+        withContext(llamaDispatcher) {
+            if (_state.value !is InferenceEngine.State.ModelReady) return@withContext InferenceEngine.STATE_FAILED
+            try {
+                saveChatState(pathPrefix, tag, maxBytes, expectedTokens)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not save the chat state", e)
+                InferenceEngine.STATE_FAILED
+            }
+        }
+
+    override suspend fun restoreState(pathPrefix: String, tag: String): Boolean =
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) {
+                "Cannot restore a chat in ${_state.value.javaClass.simpleName}!"
+            }
+            check(_readyForSystemPrompt) { "A chat must be restored ** RIGHT AFTER ** the model loaded!" }
+            _state.value = InferenceEngine.State.ProcessingSystemPrompt
+            try {
+                when (restoreChatState(pathPrefix, tag)) {
+                    0 -> {
+                        _readyForSystemPrompt = false
+                        true
+                    }
+                    else -> false
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not restore the chat state", e)
+                false
+            } finally {
+                _state.value = InferenceEngine.State.ModelReady
+            }
+        }
+
     override suspend fun updateSampling(temperature: Float, topP: Float) {
         withContext(llamaDispatcher) {
             check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
@@ -300,6 +370,20 @@ internal class InferenceEngineImpl private constructor(
             val result = setGrammar(gbnf)
             if (result != 0) Log.w(TAG, "Could not set the output grammar, code $result")
         }
+    }
+
+    override suspend fun setOutputSchema(jsonSchema: String): Boolean =
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
+            val result = setSchemaGrammar(jsonSchema)
+            if (result != 0) Log.w(TAG, "Could not use the JSON schema, code $result")
+            result == 0
+        }
+
+    override fun draftStatus(): String = when {
+        !draftWanted || !_state.value.isModelLoaded -> ""
+        draftProblem.isNotEmpty() -> draftProblem
+        else -> "Draft model on: " + draftSummary()
     }
 
     override suspend fun loadVisionProjector(pathToProjector: String): Boolean =

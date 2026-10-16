@@ -53,9 +53,11 @@ import com.arm.aichat.GenerationParams
 import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.Preset
 import java.util.UUID
+import com.pocketlm.app.data.MemoryNotes
+import com.pocketlm.app.data.Note
+import com.pocketlm.app.PocketAssist
+import androidx.compose.ui.platform.LocalContext
 import kotlin.math.roundToInt
-
-private val CONTEXT_SIZES = listOf(1024, 2048, 4096, 8192, 16384)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +67,7 @@ fun SettingsScreen(
     onOpenBenchmark: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenCompare: () -> Unit,
+    onOpenLogs: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val mode by vm.themeMode.collectAsStateWithLifecycle()
@@ -77,6 +80,11 @@ fun SettingsScreen(
     val idleMinutes by vm.idleMinutes.collectAsStateWithLifecycle()
     val maxReply by vm.maxReplyTokens.collectAsStateWithLifecycle()
     val searchServer by vm.searchServer.collectAsStateWithLifecycle()
+    val notes by vm.notes.collectAsStateWithLifecycle()
+    val saveStates by vm.saveStates.collectAsStateWithLifecycle()
+    var editingNote by remember { mutableStateOf<Note?>(null) }
+    var addingNote by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
@@ -86,6 +94,18 @@ fun SettingsScreen(
     val selectedId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val maxThreads = Runtime.getRuntime().availableProcessors()
     var editing by remember { mutableStateOf<Preset?>(null) }
+
+    if (addingNote || editingNote != null) {
+        NoteDialog(
+            initial = editingNote?.text.orEmpty(),
+            onSave = { text ->
+                editingNote?.let { vm.updateNote(it, text) } ?: vm.addNote(text)
+                editingNote = null
+                addingNote = false
+            },
+            onDismiss = { editingNote = null; addingNote = false },
+        )
+    }
 
     editing?.let { preset ->
         PresetDialog(
@@ -226,6 +246,36 @@ fun SettingsScreen(
                 }
             }
 
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Save each chat's state")
+                    Text(
+                        "Reopening a chat, or waking the model, picks up where you left off instead of reading the whole " +
+                            "chat again. Uses storage space (up to about 0.75 GB in all) that Android can take back.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = saveStates, onCheckedChange = vm::setSaveStates)
+            }
+
+            SectionTitle("Memory notes", Modifier.padding(top = 24.dp))
+            Text(
+                "Things the model should always know about you, such as \"I'm vegetarian\" or \"I write Kotlin\". " +
+                    "They are added to the system prompt of every chat, and never sent to apps that use the local API server.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            notes.forEach { note ->
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = note.enabled, onCheckedChange = { vm.setNoteEnabled(note, it) })
+                    Text(note.text, Modifier.weight(1f).padding(horizontal = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                    IconButton(onClick = { editingNote = note }) { Icon(Icons.Filled.Edit, contentDescription = "Edit note") }
+                    IconButton(onClick = { vm.deleteNote(note) }) { Icon(Icons.Filled.Delete, contentDescription = "Delete note") }
+                }
+            }
+            TextButton(onClick = { addingNote = true }) { Text("Add a note") }
+
             SectionTitle("Model tools", Modifier.padding(top = 24.dp))
             Text(
                 "Let the model use helpers while it answers. Applies the next time a model loads or you start a new chat. " +
@@ -305,6 +355,18 @@ fun SettingsScreen(
             TextButton(onClick = onOpenCompare, Modifier.fillMaxWidth()) {
                 Text("Compare two models", Modifier.weight(1f))
             }
+            TextButton(onClick = onOpenLogs, Modifier.fillMaxWidth()) {
+                Text("Diagnostics and logs")
+            }
+            TextButton(
+                onClick = { PocketAssist.openSettings(context) },
+                Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (PocketAssist.isDefault(context)) "Default assistant: PocketLM (change)"
+                    else "Make PocketLM your default assistant",
+                )
+            }
             TextButton(onClick = onOpenStorage, Modifier.fillMaxWidth()) {
                 Text("Storage and cleanup", Modifier.weight(1f))
             }
@@ -368,34 +430,7 @@ fun SettingsScreen(
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
-                SettingSlider(
-                    label = "Temperature",
-                    value = params.temperature,
-                    valueText = "%.2f".format(params.temperature),
-                    hint = "Lower is more focused, higher is more creative.",
-                    range = 0f..2f,
-                    steps = 39,
-                    onChange = { vm.setGenerationParams(params.copy(temperature = (it * 20).roundToInt() / 20f)) },
-                )
-                SettingSlider(
-                    label = "Top-p",
-                    value = params.topP,
-                    valueText = "%.2f".format(params.topP),
-                    hint = "Only sample from the most likely words that add up to this share.",
-                    range = 0.1f..1f,
-                    steps = 17,
-                    onChange = { vm.setGenerationParams(params.copy(topP = (it * 20).roundToInt() / 20f)) },
-                )
-                val ctxIndex = CONTEXT_SIZES.indexOf(params.contextSize).coerceAtLeast(0)
-                SettingSlider(
-                    label = "Context length",
-                    value = ctxIndex.toFloat(),
-                    valueText = "${params.contextSize} tokens",
-                    hint = "How much of the conversation the model can remember. Bigger uses more memory.",
-                    range = 0f..(CONTEXT_SIZES.lastIndex).toFloat(),
-                    steps = CONTEXT_SIZES.size - 2,
-                    onChange = { vm.setGenerationParams(params.copy(contextSize = CONTEXT_SIZES[it.roundToInt()])) },
-                )
+                GenerationControls(params, maxThreads, vm::setGenerationParams)
                 SettingSlider(
                     label = "Max reply length",
                     value = maxReply.toFloat(),
@@ -404,55 +439,6 @@ fun SettingsScreen(
                     range = 128f..4096f,
                     steps = 30,
                     onChange = { vm.setMaxReplyTokens(((it / 128).roundToInt() * 128).coerceIn(128, 4096)) },
-                )
-                SettingSlider(
-                    label = "Top-k",
-                    value = params.topK.toFloat(),
-                    valueText = if (params.topK == 0) "Off" else params.topK.toString(),
-                    hint = "Only consider the k most likely words at each step. 0 turns it off.",
-                    range = 0f..200f,
-                    steps = 0,
-                    onChange = { vm.setGenerationParams(params.copy(topK = it.roundToInt())) },
-                )
-                SettingSlider(
-                    label = "Min-p",
-                    value = params.minP,
-                    valueText = "%.2f".format(params.minP),
-                    hint = "Drop words far less likely than the best one. 0 turns it off.",
-                    range = 0f..0.5f,
-                    steps = 49,
-                    onChange = { vm.setGenerationParams(params.copy(minP = (it * 100).roundToInt() / 100f)) },
-                )
-                SettingSlider(
-                    label = "Repeat penalty",
-                    value = params.repeatPenalty,
-                    valueText = "%.2f".format(params.repeatPenalty),
-                    hint = "Higher discourages repeating itself. 1.00 turns it off.",
-                    range = 1f..2f,
-                    steps = 19,
-                    onChange = { vm.setGenerationParams(params.copy(repeatPenalty = (it * 20).roundToInt() / 20f)) },
-                )
-                SettingSlider(
-                    label = "CPU threads",
-                    value = params.threads.toFloat(),
-                    valueText = if (params.threads == 0) "Auto" else params.threads.toString(),
-                    hint = "Auto picks a safe number for your phone.",
-                    range = 0f..maxThreads.toFloat(),
-                    steps = maxThreads - 1,
-                    onChange = { vm.setGenerationParams(params.copy(threads = it.roundToInt())) },
-                )
-                OutlinedTextField(
-                    value = if (params.seed < 0) "" else params.seed.toString(),
-                    onValueChange = { text ->
-                        val digits = text.filter { it.isDigit() }.take(9)
-                        vm.setGenerationParams(params.copy(seed = digits.toIntOrNull() ?: -1))
-                    },
-                    label = { Text("Seed") },
-                    placeholder = { Text("Random") },
-                    supportingText = { Text("Use the same number to get repeatable replies. Leave empty for random.") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = stopWords,
@@ -508,21 +494,22 @@ private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun SettingSlider(
-    label: String,
-    value: Float,
-    valueText: String,
-    hint: String,
-    range: ClosedFloatingPointRange<Float>,
-    steps: Int,
-    onChange: (Float) -> Unit,
-) {
-    Column {
-        Row(Modifier.fillMaxWidth()) {
-            Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-            Text(valueText, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
-        }
-        Slider(value = value, onValueChange = onChange, valueRange = range, steps = steps)
-        Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
+private fun NoteDialog(initial: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial.isEmpty()) "New note" else "Edit note") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it.take(MemoryNotes.MAX_NOTE_CHARS) },
+                label = { Text("What should the model remember?") },
+                supportingText = { Text("${text.length} / ${MemoryNotes.MAX_NOTE_CHARS}") },
+                minLines = 2,
+                maxLines = 5,
+            )
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

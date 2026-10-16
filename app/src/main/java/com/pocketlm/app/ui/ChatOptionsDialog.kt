@@ -21,6 +21,12 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketlm.app.data.LocalModel
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.material3.OutlinedTextField
+import com.pocketlm.app.data.JsonSchema
 import com.pocketlm.app.data.Preset
 
 /** Settings that belong to one chat: its model, its system prompt, and JSON-only replies. */
@@ -32,12 +38,25 @@ fun ChatOptionsDialog(
     chatPresetId: String?,
     defaultPresetId: String,
     jsonMode: Boolean,
+    jsonSchema: String?,
     onModel: (LocalModel) -> Unit,
     onPreset: (String?) -> Unit,
     onJsonMode: (Boolean) -> Unit,
+    onJsonSchema: (String?) -> Unit,
+    canSummarise: Boolean,
+    onSummarise: () -> Unit,
+    onShowPrompt: (() -> Unit)?,
     onShareChat: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
+    var editingSchema by remember { mutableStateOf(false) }
+    if (editingSchema) {
+        SchemaDialog(
+            initial = jsonSchema,
+            onSave = { onJsonSchema(it); editingSchema = false },
+            onDismiss = { editingSchema = false },
+        )
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Chat options") },
@@ -71,6 +90,31 @@ fun ChatOptionsDialog(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Switch(checked = jsonMode, onCheckedChange = onJsonMode)
+                }
+                if (jsonMode) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (jsonSchema != null) "Replies must follow your schema." else "Replies can be any valid JSON.",
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = { editingSchema = true }) {
+                            Text(if (jsonSchema != null) "Edit schema" else "Use a schema")
+                        }
+                        if (jsonSchema != null) TextButton(onClick = { onJsonSchema(null) }) { Text("Remove") }
+                    }
+                }
+
+                Heading("This conversation")
+                TextButton(onClick = onSummarise, enabled = canSummarise) { Text("Summarise and continue") }
+                Text(
+                    "The model condenses the chat so far into a short summary and carries on from it, freeing up memory. " +
+                        "Your messages stay on screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (onShowPrompt != null) {
+                    TextButton(onClick = onShowPrompt) { Text("Show what the model received") }
                 }
                 if (onShareChat != null) {
                     Heading("Share")
@@ -107,4 +151,31 @@ private fun Choice(label: String, selected: Boolean, onClick: () -> Unit) {
         RadioButton(selected = selected, onClick = null)
         Text(label, Modifier.padding(start = 12.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
+}
+
+/** Typing a JSON Schema the replies must follow. */
+@Composable
+private fun SchemaDialog(initial: String?, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial ?: JsonSchema.EXAMPLE) }
+    val problem = JsonSchema.problem(text)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("JSON schema") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Schema") },
+                    isError = problem != null,
+                    supportingText = { Text(problem ?: "Replies will have exactly this shape.") },
+                    minLines = 6,
+                    maxLines = 12,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }, enabled = problem == null) { Text("Use schema") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

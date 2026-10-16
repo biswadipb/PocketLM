@@ -16,6 +16,11 @@ object ChatExport {
             if (details.isNotEmpty()) append("_").append(details.joinToString(" · ")).append("_\n\n")
 
             messages.filter { it.isUser || it.text.isNotBlank() }.forEach { m ->
+                if (m.summary) {
+                    append("> **Summary of the conversation up to here**\n>\n")
+                    append(m.text.trim().lines().joinToString("\n") { "> $it" }).append("\n\n")
+                    return@forEach
+                }
                 append(if (m.isUser) "## You\n\n" else "## PocketLM\n\n")
                 if (m.imagePath != null) append("_[Photo attached]_\n\n")
                 val parts = Thinking.split(m.text)

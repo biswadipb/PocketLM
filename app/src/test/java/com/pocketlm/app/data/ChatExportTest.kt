@@ -44,3 +44,21 @@ class ChatExportTest {
         assertTrue(ChatExport.fileName("a".repeat(200)).length <= 43)
     }
 }
+
+class ChatExportSummaryTest {
+    @Test
+    fun aSummaryIsQuotedInTheExport() {
+        val md = ChatExport.toMarkdown(
+            "T",
+            listOf(
+                StoredMessage("Question", isUser = true),
+                StoredMessage("Line one\nLine two", isUser = false, summary = true),
+                StoredMessage("Next", isUser = true),
+            ),
+            null, null,
+        )
+        assertTrue("> **Summary of the conversation up to here**" in md)
+        assertTrue("> Line one\n> Line two" in md)
+        assertTrue(md.indexOf("Summary") < md.indexOf("Next"))
+    }
+}

@@ -17,7 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Models, Search, Settings, Benchmark, Storage, Compare }
+private enum class Screen { Chat, History, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
 
 @Composable
 fun PocketLmApp(vm: PocketViewModel = viewModel()) {
@@ -45,7 +45,7 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
     BackHandler(enabled = screen != Screen.Chat) {
         screen = when (screen) {
             Screen.Search -> Screen.Models
-            Screen.Benchmark, Screen.Storage, Screen.Compare -> Screen.Settings
+            Screen.Benchmark, Screen.Storage, Screen.Compare, Screen.Logs -> Screen.Settings
             else -> Screen.Chat
         }
     }
@@ -80,8 +80,10 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                 onOpenBenchmark = { screen = Screen.Benchmark },
                 onOpenStorage = { screen = Screen.Storage },
                 onOpenCompare = { screen = Screen.Compare },
+                onOpenLogs = { screen = Screen.Logs },
                 modifier = modifier,
             )
+            Screen.Logs -> LogScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
             Screen.Compare -> CompareScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
             Screen.Benchmark -> BenchmarkScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
             Screen.Storage -> StorageScreen(
