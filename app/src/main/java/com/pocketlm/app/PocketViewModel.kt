@@ -2,6 +2,7 @@ package com.pocketlm.app
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
@@ -10,6 +11,7 @@ import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.ChatStore
+import com.pocketlm.app.data.GenStats
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
@@ -34,6 +36,7 @@ data class ChatMessage(
     val text: String,
     val isUser: Boolean,
     val id: String = UUID.randomUUID().toString(),
+    val stats: GenStats? = null,
 )
 
 /** Download progress in 0..1, or null while the size is still unknown. */
@@ -252,8 +255,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _messages.update { it + ChatMessage(prompt, true) + ChatMessage("", false) }
         _generating.value = true
         generationJob = viewModelScope.launch {
+            val start = SystemClock.elapsedRealtime()
+            var firstAt = 0L
+            var count = 0
             try {
                 engine.sendUserPrompt(enginePrompt).collect { token ->
+                    if (count == 0) firstAt = SystemClock.elapsedRealtime()
+                    count++
                     _messages.update { list ->
                         list.dropLast(1) + list.last().copy(text = list.last().text + token)
                     }
@@ -264,6 +272,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "Generation failed: ${e.message ?: e::class.simpleName}"
             } finally {
                 _generating.value = false
+                if (count > 0) {
+                    val genMs = (SystemClock.elapsedRealtime() - firstAt).coerceAtLeast(1)
+                    val stats = GenStats(
+                        tokens = count,
+                        tokensPerSecond = if (count > 1) (count - 1) * 1000f / genMs else null,
+                        firstTokenMs = firstAt - start,
+                    )
+                    _messages.update { list -> list.dropLast(1) + list.last().copy(stats = stats) }
+                }
                 saveCurrentChat()
             }
         }
@@ -297,7 +314,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             title = firstUser.lineSequence().first().take(48),
             updatedAt = System.currentTimeMillis(),
             modelFile = _loadedModel.value?.fileName,
-            messages = msgs.map { StoredMessage(it.text, it.isUser) },
+            messages = msgs.map { StoredMessage(it.text, it.isUser, it.stats) },
         )
         viewModelScope.launch {
             chatStore.save(chat)
@@ -310,7 +327,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (_loading.value) return
         stopGeneration()
         currentChatId = chat.id
-        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser) }
+        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats) }
         pendingContext = chat.messages.joinToString("\n") {
             (if (it.isUser) "User: " else "Assistant: ") + it.text
         }.takeLast(MAX_REPLAY_CHARS)

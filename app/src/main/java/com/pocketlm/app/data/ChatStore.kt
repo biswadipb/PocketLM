@@ -7,7 +7,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-data class StoredMessage(val text: String, val isUser: Boolean)
+/** Speed of one reply. [tokensPerSecond] is null when fewer than two tokens were produced. */
+data class GenStats(val tokens: Int, val tokensPerSecond: Float?, val firstTokenMs: Long)
+
+data class StoredMessage(val text: String, val isUser: Boolean, val stats: GenStats? = null)
 
 data class SavedChat(
     val id: String,
@@ -38,7 +41,15 @@ class ChatStore(private val context: Context) {
             .put("modelFile", chat.modelFile ?: JSONObject.NULL)
             .put(
                 "messages",
-                JSONArray(chat.messages.map { JSONObject().put("text", it.text).put("isUser", it.isUser) }),
+                JSONArray(chat.messages.map { m ->
+                    JSONObject().put("text", m.text).put("isUser", m.isUser).apply {
+                        m.stats?.let {
+                            put("tokens", it.tokens)
+                            put("tps", it.tokensPerSecond?.toDouble() ?: JSONObject.NULL)
+                            put("ttft", it.firstTokenMs)
+                        }
+                    }
+                }),
             )
         val target = File(dir, "${chat.id}.json")
         val tmp = File(dir, "${chat.id}.json.tmp")
@@ -60,7 +71,14 @@ class ChatStore(private val context: Context) {
             modelFile = if (o.isNull("modelFile")) null else o.getString("modelFile"),
             messages = List(arr.length()) {
                 val m = arr.getJSONObject(it)
-                StoredMessage(m.getString("text"), m.getBoolean("isUser"))
+                val stats = if (m.has("tokens")) {
+                    GenStats(
+                        tokens = m.getInt("tokens"),
+                        tokensPerSecond = if (m.isNull("tps")) null else m.getDouble("tps").toFloat(),
+                        firstTokenMs = m.getLong("ttft"),
+                    )
+                } else null
+                StoredMessage(m.getString("text"), m.getBoolean("isUser"), stats)
             },
         )
     }

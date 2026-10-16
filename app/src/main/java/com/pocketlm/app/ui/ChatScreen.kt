@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.ChatMessage
 import com.pocketlm.app.PocketViewModel
+import com.pocketlm.app.data.GenStats
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -158,8 +159,24 @@ private fun MessageBubble(message: ChatMessage) {
             if (message.text.isEmpty()) {
                 CircularProgressIndicator(Modifier.padding(14.dp), strokeWidth = 2.dp)
             } else {
-                Text(message.text, Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Text(message.text)
+                    message.stats?.let {
+                        Text(
+                            statsLine(it),
+                            Modifier.padding(top = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }
 }
+
+private fun statsLine(s: GenStats): String = buildList {
+    s.tokensPerSecond?.let { add("%.1f tok/s".format(it)) }
+    add("${s.tokens} tokens")
+    add("%.1f s to first token".format(s.firstTokenMs / 1000f))
+}.joinToString(" · ")
