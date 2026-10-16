@@ -393,13 +393,34 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
  * - current assistant message being generated
  */
 static llama_pos stop_generation_position;
+static bool g_cut_by_length = false; // the last reply ended because it reached its length limit
 static std::string cached_token_chars;
 static std::ostringstream assistant_ss;
 
 static void reset_short_term_states() {
     stop_generation_position = 0;
+    g_cut_by_length = false;
     cached_token_chars.clear();
     assistant_ss.str("");
+}
+
+/** How many tokens of the conversation are in the model's memory, how many fit, and whether the last reply was cut. */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_contextUsed(JNIEnv * /*env*/, jobject /*unused*/) {
+    return (jint) current_position;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_contextTotal(JNIEnv * /*env*/, jobject /*unused*/) {
+    return (jint) g_n_ctx;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_lastReplyCut(JNIEnv * /*env*/, jobject /*unused*/) {
+    return g_cut_by_length ? JNI_TRUE : JNI_FALSE;
 }
 
 static int decode_tokens_in_batches(
@@ -534,7 +555,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
 
     // Update position
     current_position += user_prompt_size;
-    stop_generation_position = current_position + user_prompt_size + n_predict;
+    stop_generation_position = current_position + n_predict;
     return 0;
 }
 
@@ -673,6 +694,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
     // Stop if reaching the marked position
     if (current_position >= stop_generation_position) {
+        g_cut_by_length = true;
         LOGw("%s: STOP: hitting stop position: %d", __func__, stop_generation_position);
         return nullptr;
     }

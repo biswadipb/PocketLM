@@ -135,4 +135,43 @@ class ToolsTest {
         assertNull(Wikipedia.parse("""{"batchcomplete":""}"""))
         assertNull(Wikipedia.parse("""{"query":{"pages":{"1":{"title":"T","index":1,"extract":""}}}}"""))
     }
+
+    @Test
+    fun searchResultsBecomeANumberedListOfTitlesAddressesAndSnippets() {
+        val json = """{"query":"kotlin","results":[
+            {"title":"Kotlin","url":"https://kotlinlang.org","content":"A modern   programming\nlanguage."},
+            {"title":"","url":"https://empty.example","content":"skipped, no title"},
+            {"title":"Kotlin - Wikipedia","url":"https://en.wikipedia.org/wiki/Kotlin"}]}"""
+        assertEquals(
+            "1. Kotlin (https://kotlinlang.org): A modern programming language.\n2. Kotlin - Wikipedia (https://en.wikipedia.org/wiki/Kotlin)",
+            WebSearch.parse(json),
+        )
+    }
+
+    @Test
+    fun searchResultsAreLimitedInNumberAndLength() {
+        val many = (1..10).joinToString(",") { """{"title":"T$it","url":"https://x/$it","content":"c"}""" }
+        assertEquals(4, WebSearch.parse("""{"results":[$many]}""")!!.lines().size)
+        val long = """{"results":[{"title":"T","url":"u","content":"${"word ".repeat(200)}"}]}"""
+        assertTrue(WebSearch.parse(long, maxChars = 100)!!.length <= 101)
+    }
+
+    @Test
+    fun noResultsGivesNull() {
+        assertNull(WebSearch.parse("""{"results":[]}"""))
+        assertNull(WebSearch.parse("""{"query":"x"}"""))
+    }
+
+    @Test
+    fun webSearchNeedsAServerAndSaysSoClearly() = runBlocking {
+        val all = ToolId.entries.toSet()
+        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, searchServer = null).modelText.contains("no search server"))
+        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, searchServer = "  ").modelText.contains("no search server"))
+        assertTrue(Tools.run(ToolCall("websearch", "x"), setOf(ToolId.Calculator), searchServer = "https://s.example").modelText.contains("not available"))
+    }
+
+    @Test
+    fun theSearchToolIsListedInTheInstructionsWhenOn() {
+        assertTrue(Tools.instructions(setOf(ToolId.WebSearch)).contains("- websearch:"))
+    }
 }

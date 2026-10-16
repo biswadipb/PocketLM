@@ -2,9 +2,11 @@ package com.arm.aichat.internal
 
 import android.content.Context
 import android.util.Log
+import com.arm.aichat.ContextUsage
 import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.PromptNotProcessed
+import com.arm.aichat.isModelLoaded
 import com.arm.aichat.UnsupportedArchitectureException
 import com.arm.aichat.internal.InferenceEngineImpl.Companion.getInstance
 import dalvik.annotation.optimization.FastNative
@@ -98,6 +100,15 @@ internal class InferenceEngineImpl private constructor(
 
     @FastNative
     private external fun setSampling(temperature: Float, topP: Float): Int
+
+    @FastNative
+    private external fun contextUsed(): Int
+
+    @FastNative
+    private external fun contextTotal(): Int
+
+    @FastNative
+    private external fun lastReplyCut(): Boolean
 
     @FastNative
     private external fun loadProjector(path: String): Int
@@ -269,6 +280,11 @@ internal class InferenceEngineImpl private constructor(
             _state.value = InferenceEngine.State.ModelReady
         }
     }
+
+    override fun contextUsage(): ContextUsage =
+        if (_state.value.isModelLoaded) ContextUsage(contextUsed(), contextTotal()) else ContextUsage(0, 0)
+
+    override fun lastReplyWasCut(): Boolean = _state.value.isModelLoaded && lastReplyCut()
 
     override suspend fun updateSampling(temperature: Float, topP: Float) {
         withContext(llamaDispatcher) {

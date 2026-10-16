@@ -16,9 +16,11 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Open straight to the chat from a Quick Settings tile, a home-screen widget, or the app-icon shortcut
 - Per-chat options: pick the model and system prompt for just that chat, or restrict replies to valid JSON
 - Speed under each reply: tokens per second, token count, and time to first token
+- Reasoning models: the `<think>` section a model writes first is folded into a "Thought process" you can open; copying, reading aloud and notifications use the answer only
+- A memory meter shows how full the conversation is, with a warning as it fills, and a Continue button appears when a reply stops at its length limit
 
 **Models**
-- Built-in catalog of small models, load / unload / delete
+- Built-in catalog of small models with a fit check for this phone and a "Recommended" pick; load / unload / delete
 - Resumable downloads that keep going in the background, with a progress notification
 - Search for GGUF models and download a specific quantisation from Hugging Face, ModelScope, Kaggle, or any Hugging Face compatible server you type in (a regional mirror, or one on your own network)
 - Paste a `.gguf` link or import a file from storage
@@ -60,8 +62,8 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 - Light, dark, or follow-system theme
 - Backup and restore: one zip with your chats (with photos and attached files), saved prompts, presets and settings; the API key, app lock and downloaded models are left out
 - Free memory when idle: unload the model after 5 to 60 minutes of inactivity; it loads again when you send a message (off by default)
-- Model tools: let the model use a calculator, the date and time, or a Wikipedia lookup while it answers (off by default; the model asks with a short tag, the app runs the tool and hands back the result)
-- Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts)
+- Model tools: let the model use a calculator, the date and time, a Wikipedia lookup, or a web search (through a SearXNG server you choose) while it answers (off by default; the model asks with a short tag, the app runs the tool and hands back the result)
+- Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts), and max reply length (applies to the next reply)
 - Stop words: end a reply as soon as one appears (applies immediately)
 - System prompt presets: four built in, plus your own
 - App lock: require fingerprint, face or screen lock; also hides the app in recent apps and blocks screenshots
@@ -72,6 +74,7 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 
 - PDF text extraction and text recognition (OCR) are untested on a device; OCR reads printed Latin-alphabet text only
 - Tool use depends on the model following a text format, which small models do inconsistently
+- Web search needs a SearXNG server with JSON results turned on (most public ones turn it off), and was written against its documented format rather than a live server
 - One image per message, shrunk to 1024 px on the long side; earlier images are not re-shown to the model after a chat is reopened or a reply is regenerated
 - Document search matches keywords, not meaning, so a question worded differently from the document may miss
 - Long document chats fill the context faster; raise the context length in Settings if needed
@@ -117,7 +120,7 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- More tools (web search)
+- More tools
 - Semantic document search with an embedding model, and more OCR languages
 - GPU / NPU acceleration
 

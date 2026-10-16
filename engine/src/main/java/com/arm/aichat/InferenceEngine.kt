@@ -38,6 +38,14 @@ interface InferenceEngine {
     suspend fun resetConversation(systemPrompt: String)
 
     /**
+     * How much of the model's memory the conversation fills. Cheap to call at any time, even while generating.
+     */
+    fun contextUsage(): ContextUsage
+
+    /** True if the most recent reply stopped because it reached its length limit rather than finishing. */
+    fun lastReplyWasCut(): Boolean
+
+    /**
      * Changes the temperature and top-p for further replies without reloading the model. Call between messages.
      */
     suspend fun updateSampling(temperature: Float, topP: Float)
@@ -136,6 +144,9 @@ val State.isModelLoaded: Boolean
         this is State.Generating
 
 class UnsupportedArchitectureException : Exception()
+
+/** [used] of [total] tokens of the model's memory are taken up. [total] is 0 when no model is loaded. */
+data class ContextUsage(val used: Int, val total: Int)
 
 /** The prompt could not be processed (for example it does not fit); the loaded model is still usable. */
 class PromptNotProcessed(message: String) : Exception(message)

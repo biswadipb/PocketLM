@@ -75,6 +75,8 @@ fun SettingsScreen(
     val backgroundReplies by vm.backgroundReplies.collectAsStateWithLifecycle()
     val enabledTools by vm.enabledTools.collectAsStateWithLifecycle()
     val idleMinutes by vm.idleMinutes.collectAsStateWithLifecycle()
+    val maxReply by vm.maxReplyTokens.collectAsStateWithLifecycle()
+    val searchServer by vm.searchServer.collectAsStateWithLifecycle()
     val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
@@ -241,6 +243,19 @@ fun SettingsScreen(
                 }
             }
 
+            if (ToolId.WebSearch in enabledTools) {
+                OutlinedTextField(
+                    value = searchServer,
+                    onValueChange = vm::setSearchServer,
+                    label = { Text("Search server address") },
+                    placeholder = { Text("search.example.org") },
+                    supportingText = { Text("A SearXNG server that allows JSON results, ideally your own. The model's search words are sent to it.") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+            }
+
             SectionTitle("Notifications", Modifier.padding(top = 24.dp))
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -380,6 +395,15 @@ fun SettingsScreen(
                     range = 0f..(CONTEXT_SIZES.lastIndex).toFloat(),
                     steps = CONTEXT_SIZES.size - 2,
                     onChange = { vm.setGenerationParams(params.copy(contextSize = CONTEXT_SIZES[it.roundToInt()])) },
+                )
+                SettingSlider(
+                    label = "Max reply length",
+                    value = maxReply.toFloat(),
+                    valueText = "$maxReply tokens",
+                    hint = "A reply stops at this length and shows a Continue button. Applies to the next reply.",
+                    range = 128f..4096f,
+                    steps = 30,
+                    onChange = { vm.setMaxReplyTokens(((it / 128).roundToInt() * 128).coerceIn(128, 4096)) },
                 )
                 SettingSlider(
                     label = "Top-k",

@@ -51,6 +51,7 @@ import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelCatalog
 import com.pocketlm.app.data.MemoryEstimate
+import com.pocketlm.app.data.Recommendation
 import com.pocketlm.app.data.ModelInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -123,8 +124,14 @@ fun ModelsScreen(
             }
 
             item { SectionTitle("Download") }
+            val levelOf = { c: CatalogModel ->
+                MemoryEstimate.estimate(c.sizeMb * 1024L * 1024L, null, gen.contextSize, memory.availMem, memory.totalMem).level
+            }
+            val recommended = Recommendation.pick(ModelCatalog.models, levelOf)
             items(ModelCatalog.models, key = { it.fileName }) { c ->
                 CatalogCard(
+                    level = levelOf(c),
+                    recommended = c == recommended,
                     model = c,
                     installed = models.any { it.fileName == c.fileName } &&
                         (c.projectorFileName == null || projectors.any { it.fileName == c.projectorFileName }),
@@ -291,6 +298,8 @@ private fun DetailRow(label: String, value: String?) {
 
 @Composable
 private fun CatalogCard(
+    level: MemoryEstimate.Level,
+    recommended: Boolean,
     model: CatalogModel,
     installed: Boolean,
     progress: com.pocketlm.app.DownloadState?,
@@ -300,7 +309,23 @@ private fun CatalogCard(
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(model.name, style = MaterialTheme.typography.titleSmall)
+            if (recommended) {
+                Text("Recommended for this phone", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
             Text("${model.sizeMb} MB · ${model.description}", style = MaterialTheme.typography.bodySmall)
+            Text(
+                when (level) {
+                    MemoryEstimate.Level.Comfortable -> "Should fit comfortably on this phone"
+                    MemoryEstimate.Level.Tight -> "Tight fit on this phone"
+                    MemoryEstimate.Level.TooBig -> "Probably too big for this phone"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = when (level) {
+                    MemoryEstimate.Level.Comfortable -> MaterialTheme.colorScheme.onSurfaceVariant
+                    MemoryEstimate.Level.Tight -> MaterialTheme.colorScheme.tertiary
+                    MemoryEstimate.Level.TooBig -> MaterialTheme.colorScheme.error
+                },
+            )
             when {
                 progress != null -> {
                     if (progress.progress != null) {

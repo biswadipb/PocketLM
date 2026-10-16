@@ -38,6 +38,10 @@ enum class ToolId(val id: String, val label: String, val blurb: String, val desc
         "wikipedia", "Wikipedia", "Looks up facts on Wikipedia. Sends the search words to wikipedia.org.",
         "looks up a topic on Wikipedia and returns a short summary. The input is the topic",
     ),
+    WebSearch(
+        "websearch", "Web search", "Searches the web through a SearXNG server you choose. Sends the search words to that server.",
+        "searches the web and returns the top results. The input is the search query",
+    ),
 }
 
 data class ToolCall(val name: String, val input: String)
@@ -109,7 +113,12 @@ object Tools {
         return null
     }
 
-    suspend fun run(call: ToolCall, enabled: Set<ToolId>, now: ZonedDateTime = ZonedDateTime.now()): ToolOutcome {
+    suspend fun run(
+        call: ToolCall,
+        enabled: Set<ToolId>,
+        now: ZonedDateTime = ZonedDateTime.now(),
+        searchServer: String? = null,
+    ): ToolOutcome {
         val tool = ToolId.entries.firstOrNull { it.id == call.name }
         if (tool == null || tool !in enabled) {
             return ToolOutcome("The tool '${call.name}' is not available.", "not available")
@@ -123,6 +132,14 @@ object Tools {
                 ToolId.DateTime -> {
                     val text = now.format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm (VV)", Locale.ENGLISH))
                     ToolOutcome("The current date and time is $text.", text)
+                }
+                ToolId.WebSearch -> {
+                    val server = searchServer?.let { ModelHub.normaliseAddress(it) }
+                        ?: return ToolOutcome("Web search is not set up: no search server address is saved.", "no search server set")
+                    if (call.input.isBlank()) throw IllegalArgumentException("Nothing to search for")
+                    val results = WebSearch.query(server, call.input)
+                        ?: return ToolOutcome("The search found nothing for '${call.input}'.", "no results")
+                    ToolOutcome("Search results for '${call.input}':\n$results", "${results.lines().count { it.isNotBlank() && it[0].isDigit() }} results")
                 }
                 ToolId.Wikipedia -> {
                     if (call.input.isBlank()) throw IllegalArgumentException("Nothing to look up")
@@ -303,6 +320,41 @@ object Wikipedia {
         val extract = best.optString("extract").trim()
         if (extract.isEmpty()) return null
         val text = "${best.optString("title")}: $extract"
+        return if (text.length <= maxChars) text else text.take(maxChars).trimEnd() + "…"
+    }
+}
+
+/** Web search through a SearXNG server (https://docs.searxng.org), which must have the JSON format enabled. */
+object WebSearch {
+
+    suspend fun query(server: String, query: String): String? = withContext(Dispatchers.IO) {
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val json = try {
+            Http.request("${server.trimEnd('/')}/search?q=$q&format=json&safesearch=1")
+        } catch (e: IOException) {
+            if (e.message?.contains("login") == true) {
+                throw IOException("That search server does not allow JSON results. Use one that does, such as your own.")
+            }
+            throw e
+        }
+        parse(json)
+    }
+
+    /** The top results as a numbered list of "title (address): snippet", or null when there are none. */
+    fun parse(json: String, maxResults: Int = 4, maxChars: Int = 1600): String? {
+        val results = JSONObject(json).optJSONArray("results") ?: return null
+        val lines = ArrayList<String>()
+        for (i in 0 until results.length()) {
+            val r = results.optJSONObject(i) ?: continue
+            val title = r.optString("title").trim()
+            if (title.isEmpty()) continue
+            val snippet = r.optString("content").trim().replace(Regex("""\s+"""), " ").take(300)
+            val url = r.optString("url").trim()
+            lines += "${lines.size + 1}. $title ($url)" + if (snippet.isNotEmpty()) ": $snippet" else ""
+            if (lines.size >= maxResults) break
+        }
+        if (lines.isEmpty()) return null
+        val text = lines.joinToString("\n")
         return if (text.length <= maxChars) text else text.take(maxChars).trimEnd() + "…"
     }
 }

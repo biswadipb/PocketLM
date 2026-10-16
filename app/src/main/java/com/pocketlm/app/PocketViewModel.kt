@@ -19,6 +19,7 @@ import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.Attachment
 import com.pocketlm.app.data.BackupManager
+import com.arm.aichat.ContextUsage
 import com.pocketlm.app.data.ApiBackend
 import com.pocketlm.app.data.ApiException
 import com.pocketlm.app.data.BenchResult
@@ -36,6 +37,7 @@ import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.SettingsBackup
 import com.pocketlm.app.data.StopWords
+import com.pocketlm.app.data.Thinking
 import com.pocketlm.app.data.ToolId
 import com.pocketlm.app.data.Tools
 import com.pocketlm.app.data.StorageManager
@@ -553,6 +555,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     awaitModelReady()
                     if (changedSampling) engine.updateSampling(chatSampling.temperature, chatSampling.topP)
                     engine.resetConversation(chatSystemPrompt)
+                    refreshContextUsage()
                     if (_jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
                     pendingContext = replayText(_messages.value.map { it.isUser to it.text })
                 } catch (e: Exception) {
@@ -571,6 +574,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val backupKeys = setOf(
         KEY_THEME, KEY_CTX, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
         KEY_STOP, KEY_PRESETS, KEY_PRESET_ID, KEY_PROMPTS, KEY_TOOLS, KEY_BG_REPLIES, KEY_READ_ALOUD, KEY_IDLE_MINUTES,
+        KEY_MAX_REPLY,
     )
 
     private fun backupManager(): BackupManager {
@@ -647,6 +651,47 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _backgroundReplies.value = prefs.getBoolean(KEY_BG_REPLIES, true)
         _readAloud.value = prefs.getBoolean(KEY_READ_ALOUD, false)
         _idleMinutes.value = prefs.getInt(KEY_IDLE_MINUTES, 0)
+        _maxReplyTokens.value = prefs.getInt(KEY_MAX_REPLY, InferenceEngine.DEFAULT_PREDICT_LENGTH)
+    }
+
+    // ---- Conversation memory, cut-off replies, reply length ------------------------------
+
+    private val _contextUsage = MutableStateFlow(ContextUsage(0, 0))
+
+    /** How much of the model's memory this conversation fills. */
+    val contextUsage = _contextUsage.asStateFlow()
+
+    private fun refreshContextUsage() {
+        _contextUsage.value =
+            if (_sleeping.value || _loadedModel.value == null) ContextUsage(0, 0) else engine.contextUsage()
+    }
+
+    private val _cutOffId = MutableStateFlow<String?>(null)
+
+    /** Id of a reply that stopped at its length limit, so a Continue button can be offered. */
+    val cutOffId = _cutOffId.asStateFlow()
+
+    private val _maxReplyTokens = MutableStateFlow(prefs.getInt(KEY_MAX_REPLY, InferenceEngine.DEFAULT_PREDICT_LENGTH))
+
+    /** Longest a reply may be, in tokens. Applies to the next reply. */
+    val maxReplyTokens = _maxReplyTokens.asStateFlow()
+
+    fun setMaxReplyTokens(tokens: Int) {
+        _maxReplyTokens.value = tokens
+        prefs.edit().putInt(KEY_MAX_REPLY, tokens).apply()
+    }
+
+    /** Asks the model to carry on from where a cut-off reply stopped, adding to the same reply. */
+    fun continueReply() {
+        val last = _messages.value.lastOrNull() ?: return
+        if (last.isUser || last.id != _cutOffId.value || anythingRunning()) return
+        _cutOffId.value = null
+        val prompt = "Continue exactly where you stopped. Do not repeat what you already wrote."
+        if (_sleeping.value) {
+            viewModelScope.launch { if (wakeIfAsleep()) startGeneration(prompt, continuing = true) }
+        } else {
+            startGeneration(prompt, continuing = true)
+        }
     }
 
     // ---- Freeing memory when idle ----------------------------------------------------
@@ -688,6 +733,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (!idle) return
         runCatching { engine.cleanUp() }
         _sleeping.value = true
+        refreshContextUsage()
     }
 
     /** Reloads the model if it was put to sleep. Returns false (and reports why) if that fails. */
@@ -716,6 +762,16 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Tools the model is told about. Takes effect the next time a model loads or a new chat starts. */
     val enabledTools = _enabledTools.asStateFlow()
+
+    private val _searchServer = MutableStateFlow(prefs.getString(KEY_SEARCH_SERVER, "") ?: "")
+
+    /** Address of the SearXNG server used by the web search tool. */
+    val searchServer = _searchServer.asStateFlow()
+
+    fun setSearchServer(address: String) {
+        _searchServer.value = address
+        prefs.edit().putString(KEY_SEARCH_SERVER, address).apply()
+    }
 
     fun setToolEnabled(tool: ToolId, on: Boolean) {
         _enabledTools.update { if (on) it + tool else it - tool }
@@ -766,7 +822,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val voice = speaker ?: Speaker(
             getApplication(), onSpeaking = { _speakingId.value = it }, onProblem = { _error.value = it },
         ).also { speaker = it }
-        voice.speak(message.id, message.text)
+        voice.speak(message.id, Thinking.answerOnly(message.text))
     }
 
     fun stopSpeaking() {
@@ -1167,10 +1223,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         if (applyJson && _jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
+        refreshContextUsage()
     }
 
     fun unload() {
         _sleeping.value = false
+        _contextUsage.value = ContextUsage(0, 0)
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         _loadedModel.value = null
@@ -1244,19 +1302,20 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun replayText(items: List<Pair<Boolean, String>>): String? =
         items.takeIf { it.isNotEmpty() }
-            ?.joinToString("\n") { (isUser, text) -> (if (isUser) "User: " else "Assistant: ") + text }
+            ?.joinToString("\n") { (isUser, text) -> if (isUser) "User: $text" else "Assistant: ${Thinking.answerOnly(text)}" }
             ?.takeLast(MAX_REPLAY_CHARS)
 
     /** Streams a reply to [prompt], which must already be the last message in the list. */
-    private fun startGeneration(prompt: String, imagePath: String? = null) {
+    private fun startGeneration(prompt: String, imagePath: String? = null, continuing: Boolean = false) {
+        _cutOffId.value = null
         // After reopening a saved chat the engine has no memory of it, so replay it once.
-        val question = withDocumentContext(prompt)
+        val question = if (continuing) prompt else withDocumentContext(prompt)
         val enginePrompt = pendingContext?.let {
             "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $question"
         } ?: question
         pendingContext = null
 
-        _messages.update { it + ChatMessage("", false) }
+        if (!continuing) _messages.update { it + ChatMessage("", false) }
         _generating.value = true
         if (_backgroundReplies.value) {
             ReplyGateway.stopRequested = ::stopGeneration
@@ -1274,14 +1333,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             suspend fun streamRound(prompt: String, image: String?, base: String): String {
                 var written = ""
                 val reply = if (image != null && _visionReady.value) {
-                    engine.sendUserPromptWithImage(prompt, image)
+                    engine.sendUserPromptWithImage(prompt, image, _maxReplyTokens.value)
                 } else {
-                    engine.sendUserPrompt(prompt)
+                    engine.sendUserPrompt(prompt, _maxReplyTokens.value)
                 }
                 try {
                     reply.collect { token ->
                         if (count == 0) firstAt = SystemClock.elapsedRealtime()
                         count++
+                        if (count % 16 == 0) refreshContextUsage()
                         written += token
                         val cut = StopWords.cutIndex(written, stops)
                         if (cut >= 0) written = written.substring(0, cut).trimEnd()
@@ -1299,14 +1359,14 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 var prompt = enginePrompt
                 var image = imagePath
-                var base = ""
+                var base = if (continuing) _messages.value.last().text else ""
                 var toolRounds = 0
                 while (true) {
                     val written = streamRound(prompt, image, base)
                     val call = if (tools.isEmpty()) null else Tools.parseCall(written)
                     if (call == null || toolRounds >= Tools.MAX_ROUNDS) break
 
-                    val outcome = Tools.run(call, tools)
+                    val outcome = Tools.run(call, tools, searchServer = _searchServer.value)
                     val before = written.substringBefore(Tools.OPEN_TAG).trim()
                     base = listOf(base.trimEnd(), before, Tools.statusLine(call, outcome))
                         .filter { it.isNotEmpty() }.joinToString("\n\n") + "\n\n"
@@ -1315,6 +1375,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     image = null
                     toolRounds++
                 }
+                // Reached only when the reply finished by itself: did it stop because it ran out of length?
+                _cutOffId.value = if (engine.lastReplyWasCut()) _messages.value.lastOrNull()?.takeIf { !it.isUser }?.id else null
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1322,6 +1384,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 _generating.value = false
                 touch()
+                refreshContextUsage()
                 ReplyService.stop(getApplication())
                 if (count == 0) {
                     // Nothing was written (an error, or stopped before the first word): drop the empty bubble.
@@ -1343,7 +1406,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 if (count > 0 && !appVisible && _backgroundReplies.value) {
                     val chatTitle = _chats.value.firstOrNull { it.id == currentChatId }?.title
                         ?: _messages.value.firstOrNull { it.isUser }?.text?.lineSequence()?.first()?.take(48).orEmpty()
-                    ReplyNotifier.replyReady(getApplication(), chatTitle, _messages.value.lastOrNull()?.text.orEmpty())
+                    ReplyNotifier.replyReady(getApplication(), chatTitle, Thinking.answerOnly(_messages.value.lastOrNull()?.text.orEmpty()))
                 }
             }
         }
@@ -1434,6 +1497,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             _attachments.value.forEach { a -> viewModelScope.launch { docStore.delete(a.id) } }
         }
         removePendingImage()
+        _cutOffId.value = null
         _chatPresetId.value = null
         _jsonMode.value = false
         _attachments.value = emptyList()
@@ -1616,6 +1680,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_BG_REPLIES = "background_replies"
         const val KEY_TOOLS = "enabled_tools"
         const val KEY_IDLE_MINUTES = "idle_minutes"
+        const val KEY_MAX_REPLY = "max_reply_tokens"
+        const val KEY_SEARCH_SERVER = "search_server"
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20

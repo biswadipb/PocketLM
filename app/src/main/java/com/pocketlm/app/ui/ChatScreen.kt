@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -79,7 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.ChatMessage
 import com.pocketlm.app.PocketViewModel
+import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.GenStats
+import com.pocketlm.app.data.Thinking
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,6 +106,8 @@ fun ChatScreen(
     val speakingId by vm.speakingId.collectAsStateWithLifecycle()
     val deviceStatus by vm.deviceStatus.collectAsStateWithLifecycle()
     val sleeping by vm.sleeping.collectAsStateWithLifecycle()
+    val usage by vm.contextUsage.collectAsStateWithLifecycle()
+    val cutOffId by vm.cutOffId.collectAsStateWithLifecycle()
     val attachStatus by vm.attachStatus.collectAsStateWithLifecycle()
     val presets by vm.presets.collectAsStateWithLifecycle()
     val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
@@ -276,6 +281,8 @@ fun ChatScreen(
                             message,
                             speaking = speakingId == message.id,
                             onSpeak = { if (speakingId == message.id) vm.stopSpeaking() else vm.speak(message) },
+                            canContinue = message.id == cutOffId && !generating && !loading,
+                            onContinue = vm::continueReply,
                             canEdit = message.isUser && !generating && !loading && loaded != null,
                             onEdit = { editing = message },
                             canRegenerate = message.id == messages.lastOrNull()?.id &&
@@ -322,6 +329,23 @@ fun ChatScreen(
                         },
                     )
                 }
+            }
+        }
+        if (usage.total > 0) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                LinearProgressIndicator(
+                    progress = { ContextMeter.fraction(usage) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = if (ContextMeter.level(usage) == ContextMeter.Level.Fine) MaterialTheme.colorScheme.primary
+                    else if (ContextMeter.level(usage) == ContextMeter.Level.Filling) MaterialTheme.colorScheme.tertiary
+                    else MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    ContextMeter.warning(usage) ?: ContextMeter.label(usage),
+                    Modifier.padding(top = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
         Row(
@@ -382,6 +406,8 @@ private fun MessageBubble(
     message: ChatMessage,
     speaking: Boolean,
     onSpeak: () -> Unit,
+    canContinue: Boolean,
+    onContinue: () -> Unit,
     canEdit: Boolean,
     onEdit: () -> Unit,
     canRegenerate: Boolean,
@@ -408,7 +434,13 @@ private fun MessageBubble(
                             Modifier.padding(bottom = 8.dp).heightIn(max = 180.dp).clip(RoundedCornerShape(12.dp)),
                         )
                     }
-                    if (message.isUser) Text(message.text) else MarkdownText(message.text)
+                    if (message.isUser) {
+                        Text(message.text)
+                    } else {
+                        val parts = remember(message.text) { Thinking.split(message.text) }
+                        parts.thinking?.let { ThinkingSection(message.id, it, parts.thinkingOpen) }
+                        if (parts.answer.isNotBlank()) MarkdownText(parts.answer)
+                    }
                     if (canEdit) {
                         IconButton(onClick = onEdit, modifier = Modifier.align(Alignment.End)) {
                             Icon(Icons.Filled.Edit, contentDescription = "Edit message")
@@ -423,7 +455,7 @@ private fun MessageBubble(
                         )
                     }
                     Row {
-                        IconButton(onClick = { clipboard.setText(AnnotatedString(message.text)) }) {
+                        IconButton(onClick = { clipboard.setText(AnnotatedString(if (message.isUser) message.text else Thinking.answerOnly(message.text))) }) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message")
                         }
                         IconButton(onClick = onSpeak) {
@@ -431,6 +463,12 @@ private fun MessageBubble(
                                 if (speaking) Icons.Filled.Stop else Icons.AutoMirrored.Filled.VolumeUp,
                                 contentDescription = if (speaking) "Stop reading" else "Read aloud",
                             )
+                        }
+                        if (canContinue) {
+                            TextButton(onClick = onContinue) {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                                Text(" Continue")
+                            }
                         }
                         if (canRegenerate) {
                             IconButton(onClick = onRegenerate) {
