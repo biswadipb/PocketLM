@@ -29,7 +29,7 @@ import com.pocketlm.app.data.ChatStore
 import com.pocketlm.app.data.DeviceStatus
 import com.pocketlm.app.data.DocumentStore
 import com.pocketlm.app.data.GenStats
-import com.pocketlm.app.data.HfClient
+import com.pocketlm.app.data.HubSource
 import com.pocketlm.app.data.HfFile
 import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
@@ -41,6 +41,7 @@ import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ImageStore
 import com.pocketlm.app.data.JsonGrammar
 import com.pocketlm.app.data.ModelCatalog
+import com.pocketlm.app.data.ModelHub
 import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
@@ -797,15 +798,59 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private var searchJob: Job? = null
 
+    private val _hubSource = MutableStateFlow(
+        HubSource.entries.firstOrNull { it.name == prefs.getString(KEY_HUB, null) } ?: HubSource.HuggingFace
+    )
+
+    /** Which repository the search screen looks in. */
+    val hubSource = _hubSource.asStateFlow()
+
+    private val _mirrorUrl = MutableStateFlow(prefs.getString(KEY_MIRROR, "") ?: "")
+
+    /** Address of a Hugging Face compatible server, used when the source is [HubSource.Mirror]. */
+    val mirrorUrl = _mirrorUrl.asStateFlow()
+
+    /** Bumped whenever the source changes, so answers from the old source can be ignored. */
+    private var hubEpoch = 0
+
+    fun setHubSource(source: HubSource) {
+        if (source == _hubSource.value) return
+        _hubSource.value = source
+        prefs.edit().putString(KEY_HUB, source.name).apply()
+        resetSearch()
+    }
+
+    fun setMirrorUrl(url: String) {
+        _mirrorUrl.value = url
+        prefs.edit().putString(KEY_MIRROR, url).apply()
+        if (_hubSource.value == HubSource.Mirror) resetSearch()
+    }
+
+    private fun resetSearch() {
+        hubEpoch++
+        searchJob?.cancel()
+        _search.value = SearchState()
+        _repoFiles.value = emptyMap()
+    }
+
+    private fun currentHub(): ModelHub = ModelHub.create(_hubSource.value, _mirrorUrl.value)
+
     fun searchHub(query: String) {
         val q = query.trim()
         if (q.isEmpty()) return
         searchJob?.cancel()
+        val hub = try {
+            currentHub()
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not open that repository"
+            return
+        }
+        val epoch = hubEpoch
         _search.value = SearchState(query = q, loading = true)
         searchJob = viewModelScope.launch {
             try {
-                val results = HfClient.search(q)
-                _search.value = SearchState(query = q, searched = true, results = results)
+                val results = hub.search(q)
+                if (epoch == hubEpoch) _search.value = SearchState(query = q, searched = true, results = results)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -817,21 +862,30 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadRepoFiles(repoId: String) {
         if (_repoFiles.value[repoId]?.files != null) return
+        val hub = try {
+            currentHub()
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not open that repository"
+            return
+        }
+        val epoch = hubEpoch
         _repoFiles.update { it + (repoId to RepoFiles()) }
         viewModelScope.launch {
             try {
-                val files = HfClient.files(repoId)
-                _repoFiles.update { it + (repoId to RepoFiles(files = files)) }
+                val files = hub.files(repoId)
+                if (epoch == hubEpoch) _repoFiles.update { it + (repoId to RepoFiles(files = files)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _repoFiles.update { it + (repoId to RepoFiles(error = e.message ?: "Could not load files")) }
+                if (epoch == hubEpoch) {
+                    _repoFiles.update { it + (repoId to RepoFiles(error = e.message ?: "Could not load files")) }
+                }
             }
         }
     }
 
     fun downloadFromHub(repoId: String, file: HfFile) =
-        startDownload(HfClient.downloadUrl(repoId, file.path), file.fileName)
+        startDownload(currentHub().downloadUrl(repoId, file.path), file.fileName)
 
     fun cancelDownload(fileName: String) {
         center.cancel(fileName)
@@ -1267,6 +1321,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_LOCK = "app_lock"
         const val KEY_READ_ALOUD = "read_aloud"
         const val KEY_API_ENABLED = "api_enabled"
+        const val KEY_HUB = "hub_source"
+        const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20
         const val MAX_INCOMING_CHARS = 8000
         val DEFAULT_PARAMS = GenerationParams()

@@ -20,7 +20,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 **Models**
 - Built-in catalog of small models, load / unload / delete
 - Resumable downloads that keep going in the background, with a progress notification
-- Search Hugging Face for any GGUF model and download a specific quantisation
+- Search for GGUF models and download a specific quantisation from Hugging Face, ModelScope, or any Hugging Face compatible server you type in (a regional mirror, or one on your own network)
 - Paste a `.gguf` link or import a file from storage
 - Model details read from the GGUF header: parameters, architecture, quantisation, trained context length, layers, license
 - Fit warnings: an estimate of the memory each model needs, with a confirmation before loading one that probably will not fit

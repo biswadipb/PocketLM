@@ -19,6 +19,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -48,6 +53,7 @@ import com.pocketlm.app.DownloadState
 import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.HfFile
 import com.pocketlm.app.data.HfModel
+import com.pocketlm.app.data.HubSource
 import com.pocketlm.app.data.MemoryEstimate
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -59,6 +65,8 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
     val installed by vm.models.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val gen by vm.generationParams.collectAsStateWithLifecycle()
+    val source by vm.hubSource.collectAsStateWithLifecycle()
+    val mirrorUrl by vm.mirrorUrl.collectAsStateWithLifecycle()
     val searchContext = LocalContext.current
     val memory = remember {
         ActivityManager.MemoryInfo().also {
@@ -70,13 +78,33 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
 
     Column(modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text("Search Hugging Face") },
+            title = { Text("Find models") },
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             },
         )
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            HubSource.entries.forEach { s ->
+                FilterChip(selected = s == source, onClick = { vm.setHubSource(s) }, label = { Text(s.label) })
+            }
+        }
+        if (source == HubSource.Mirror) {
+            OutlinedTextField(
+                value = mirrorUrl,
+                onValueChange = vm::setMirrorUrl,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                label = { Text("Server address") },
+                placeholder = { Text("hf-mirror.com") },
+                supportingText = { Text("Any server that works like Hugging Face: a regional mirror, or one on your own network.") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+        }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
@@ -95,7 +123,13 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
         Box(Modifier.fillMaxSize()) {
             when {
                 state.loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                !state.searched -> Hint("Search for GGUF models. Smaller quantised files (Q4) run best on phones.")
+                !state.searched -> Hint(
+                    when (source) {
+                        HubSource.HuggingFace -> "Search Hugging Face for GGUF models. Smaller quantised files (Q4) run best on phones."
+                        HubSource.ModelScope -> "Search ModelScope for GGUF models. It is often faster to reach from mainland China."
+                        HubSource.Mirror -> "Enter the server's address above, then search."
+                    }
+                )
                 state.results.isEmpty() -> Hint("No models found.")
                 else -> LazyColumn(
                     contentPadding = PaddingValues(16.dp),

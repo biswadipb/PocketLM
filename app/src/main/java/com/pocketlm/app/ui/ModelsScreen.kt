@@ -143,7 +143,7 @@ fun ModelsScreen(
             item {
                 OutlinedButton(onClick = onOpenSearch, Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.Search, contentDescription = null)
-                    Text("  Search Hugging Face")
+                    Text("  Find models online")
                 }
             }
 
