@@ -15,7 +15,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
@@ -23,6 +25,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,9 +50,18 @@ private val CONTEXT_SIZES = listOf(1024, 2048, 4096, 8192, 16384)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    vm: PocketViewModel,
+    onBack: () -> Unit,
+    onOpenBenchmark: () -> Unit,
+    onOpenStorage: () -> Unit,
+    onOpenCompare: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val mode by vm.themeMode.collectAsStateWithLifecycle()
     val params by vm.generationParams.collectAsStateWithLifecycle()
+    val stopWords by vm.stopWords.collectAsStateWithLifecycle()
+    val lockEnabled by vm.lockEnabled.collectAsStateWithLifecycle()
     val presets by vm.presets.collectAsStateWithLifecycle()
     val selectedId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val maxThreads = Runtime.getRuntime().availableProcessors()
@@ -91,6 +103,31 @@ fun SettingsScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier =
                         Text(option.label, Modifier.padding(start = 12.dp))
                     }
                 }
+            }
+
+            SectionTitle("Privacy", Modifier.padding(top = 24.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Require unlock")
+                    Text(
+                        "Ask for your fingerprint, face or screen lock when opening the app. " +
+                            "Also hides it in recent apps and blocks screenshots.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = lockEnabled, onCheckedChange = vm::setAppLock)
+            }
+
+            SectionTitle("Tools", Modifier.padding(top = 24.dp))
+            TextButton(onClick = onOpenBenchmark, Modifier.fillMaxWidth()) {
+                Text("Benchmark the loaded model", Modifier.weight(1f))
+            }
+            TextButton(onClick = onOpenCompare, Modifier.fillMaxWidth()) {
+                Text("Compare two models", Modifier.weight(1f))
+            }
+            TextButton(onClick = onOpenStorage, Modifier.fillMaxWidth()) {
+                Text("Storage and cleanup", Modifier.weight(1f))
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 24.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -181,6 +218,33 @@ fun SettingsScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier =
                     onChange = { vm.setGenerationParams(params.copy(contextSize = CONTEXT_SIZES[it.roundToInt()])) },
                 )
                 SettingSlider(
+                    label = "Top-k",
+                    value = params.topK.toFloat(),
+                    valueText = if (params.topK == 0) "Off" else params.topK.toString(),
+                    hint = "Only consider the k most likely words at each step. 0 turns it off.",
+                    range = 0f..200f,
+                    steps = 0,
+                    onChange = { vm.setGenerationParams(params.copy(topK = it.roundToInt())) },
+                )
+                SettingSlider(
+                    label = "Min-p",
+                    value = params.minP,
+                    valueText = "%.2f".format(params.minP),
+                    hint = "Drop words far less likely than the best one. 0 turns it off.",
+                    range = 0f..0.5f,
+                    steps = 49,
+                    onChange = { vm.setGenerationParams(params.copy(minP = (it * 100).roundToInt() / 100f)) },
+                )
+                SettingSlider(
+                    label = "Repeat penalty",
+                    value = params.repeatPenalty,
+                    valueText = "%.2f".format(params.repeatPenalty),
+                    hint = "Higher discourages repeating itself. 1.00 turns it off.",
+                    range = 1f..2f,
+                    steps = 19,
+                    onChange = { vm.setGenerationParams(params.copy(repeatPenalty = (it * 20).roundToInt() / 20f)) },
+                )
+                SettingSlider(
                     label = "CPU threads",
                     value = params.threads.toFloat(),
                     valueText = if (params.threads == 0) "Auto" else params.threads.toString(),
@@ -188,6 +252,28 @@ fun SettingsScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier =
                     range = 0f..maxThreads.toFloat(),
                     steps = maxThreads - 1,
                     onChange = { vm.setGenerationParams(params.copy(threads = it.roundToInt())) },
+                )
+                OutlinedTextField(
+                    value = if (params.seed < 0) "" else params.seed.toString(),
+                    onValueChange = { text ->
+                        val digits = text.filter { it.isDigit() }.take(9)
+                        vm.setGenerationParams(params.copy(seed = digits.toIntOrNull() ?: -1))
+                    },
+                    label = { Text("Seed") },
+                    placeholder = { Text("Random") },
+                    supportingText = { Text("Use the same number to get repeatable replies. Leave empty for random.") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = stopWords,
+                    onValueChange = vm::setStopWords,
+                    label = { Text("Stop words") },
+                    supportingText = { Text("One per line. A reply ends as soon as one appears. Applies immediately.") },
+                    minLines = 2,
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }

@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import android.app.ActivityManager
+import android.content.Context
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -49,6 +52,7 @@ import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelCatalog
+import com.pocketlm.app.data.MemoryEstimate
 import com.pocketlm.app.data.ModelInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,7 +71,13 @@ fun ModelsScreen(
     val infos by vm.modelInfo.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val projectorChoice by vm.projectorChoice.collectAsStateWithLifecycle()
+    val gen by vm.generationParams.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val memory = remember(models) {
+        ActivityManager.MemoryInfo().also {
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(it)
+        }
+    }
     var url by rememberSaveable { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -96,6 +106,11 @@ fun ModelsScreen(
                     model = m,
                     info = infos[m.path],
                     sizeText = Formatter.formatShortFileSize(context, m.sizeBytes),
+                    fit = MemoryEstimate.estimate(m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem),
+                    memoryText = "${Formatter.formatShortFileSize(context, memory.availMem)} free of " +
+                        Formatter.formatShortFileSize(context, memory.totalMem),
+                    needText = Formatter.formatShortFileSize(context, MemoryEstimate.estimate(
+                        m.sizeBytes, infos[m.path], gen.contextSize, memory.availMem, memory.totalMem).neededBytes),
                     isLoaded = loaded?.path == m.path,
                     busy = loading,
                     onLoad = { vm.load(m); onModelLoaded() },
@@ -162,6 +177,9 @@ private fun LocalModelCard(
     model: LocalModel,
     info: ModelInfo?,
     sizeText: String,
+    fit: MemoryEstimate.Result,
+    memoryText: String,
+    needText: String,
     isLoaded: Boolean,
     busy: Boolean,
     onLoad: () -> Unit,
@@ -179,6 +197,35 @@ private fun LocalModelCard(
                 listOfNotNull(sizeText, info?.summary?.takeIf { it.isNotEmpty() }).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,
             )
+            val fitColor = when (fit.level) {
+                MemoryEstimate.Level.Comfortable -> MaterialTheme.colorScheme.primary
+                MemoryEstimate.Level.Tight -> MaterialTheme.colorScheme.tertiary
+                MemoryEstimate.Level.TooBig -> MaterialTheme.colorScheme.error
+            }
+            Text(
+                when (fit.level) {
+                    MemoryEstimate.Level.Comfortable -> "Should fit: about $needText needed ($memoryText)"
+                    MemoryEstimate.Level.Tight -> "Tight fit: about $needText needed ($memoryText)"
+                    MemoryEstimate.Level.TooBig -> "Probably too big: about $needText needed ($memoryText)"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = fitColor,
+            )
+            var confirmLoad by remember { mutableStateOf(false) }
+            if (confirmLoad) {
+                AlertDialog(
+                    onDismissRequest = { confirmLoad = false },
+                    title = { Text("This model may not fit") },
+                    text = {
+                        Text(
+                            "It needs about $needText of memory and your phone has $memoryText. " +
+                                "Loading it could be very slow or close the app. You can lower the context length in Settings to use less."
+                        )
+                    },
+                    confirmButton = { TextButton(onClick = { confirmLoad = false; onLoad() }) { Text("Load anyway") } },
+                    dismissButton = { TextButton(onClick = { confirmLoad = false }) { Text("Cancel") } },
+                )
+            }
             var showDetails by rememberSaveable { mutableStateOf(false) }
             if (showDetails && info != null) {
                 Column(Modifier.padding(top = 8.dp)) {
@@ -196,7 +243,10 @@ private fun LocalModelCard(
                 if (isLoaded) {
                     Button(onClick = onUnload) { Text("Unload") }
                 } else {
-                    Button(onClick = onLoad, enabled = !busy) { Text("Load") }
+                    Button(
+                        onClick = { if (fit.level == MemoryEstimate.Level.TooBig) confirmLoad = true else onLoad() },
+                        enabled = !busy,
+                    ) { Text("Load") }
                 }
                 TextButton(onClick = onDelete) {
                     Icon(Icons.Filled.Delete, contentDescription = null)

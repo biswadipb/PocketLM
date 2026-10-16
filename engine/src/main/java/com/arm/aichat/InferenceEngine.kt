@@ -32,6 +32,12 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Constrains further output to a GBNF grammar (for example valid JSON), or lifts the
+     * constraint when [gbnf] is empty. Call between messages.
+     */
+    suspend fun setOutputGrammar(gbnf: String)
+
+    /**
      * Loads a multimodal projector (an "mmproj" GGUF) for the loaded model so it can read images.
      * Call after [loadModel]. Returns false if the projector doesn't match or has no vision support.
      */
@@ -96,6 +102,11 @@ data class GenerationParams(
     val threads: Int = 0,
     val temperature: Float = 0.7f,
     val topP: Float = 0.95f,
+    val topK: Int = 40,
+    val minP: Float = 0.05f,
+    val repeatPenalty: Float = 1.0f,
+    /** A negative seed means a different random seed every session. */
+    val seed: Int = -1,
 )
 
 val State.isUninterruptible

@@ -17,6 +17,10 @@ data class ModelInfo(
     val layers: Int?,
     val embeddingSize: Int?,
     val license: String?,
+    val headCount: Int? = null,
+    val headCountKv: Int? = null,
+    val keyLength: Int? = null,
+    val valueLength: Int? = null,
 ) {
     /** One line for the model card, e.g. "0.5B · qwen2 · Q4_K - Medium". */
     val summary: String
@@ -41,6 +45,10 @@ data class ModelInfo(
             layers = dimensions?.blockCount,
             embeddingSize = dimensions?.embeddingSize,
             license = author?.license,
+            headCount = attention?.headCount,
+            headCountKv = attention?.headCountKv,
+            keyLength = attention?.keyLength,
+            valueLength = attention?.valueLength,
         )
     }
 }

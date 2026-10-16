@@ -9,7 +9,11 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 **Chat**
 - Streaming replies with a stop button
 - Markdown rendering: headings, lists, bold, italic, inline code, and fenced code blocks with a copy button
-- Copy any reply, and regenerate the latest one
+- Copy any reply, regenerate the latest one, or edit one of your messages and re-run from there
+- Saved prompts: reusable messages you can insert from the message box
+- Share text into PocketLM from any app, or send selected text through the text selection menu
+- Open straight to the chat from a Quick Settings tile, a home-screen widget, or the app-icon shortcut
+- Per-chat options: pick the model and system prompt for just that chat, or restrict replies to valid JSON
 - Speed under each reply: tokens per second, token count, and time to first token
 
 **Models**
@@ -17,9 +21,12 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Search Hugging Face for any GGUF model and download a specific quantisation
 - Paste a `.gguf` link or import a file from storage
 - Model details read from the GGUF header: parameters, architecture, quantisation, trained context length, layers, license
+- Fit warnings: an estimate of the memory each model needs, with a confirmation before loading one that probably will not fit
+- Benchmark the loaded model (prompt and reply speed) and compare results across models
+- Compare two models side by side on the same question
 
 **Conversations**
-- Chats are saved automatically; reopen or delete them from History
+- Chats are saved automatically; reopen, rename, pin, search and delete them from History
 - Reopening a chat reloads its model and replays the recent conversation with your next message
 
 **Documents**
@@ -34,8 +41,12 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 
 **Settings**
 - Light, dark, or follow-system theme
-- Generation: temperature, top-p, context length, CPU threads (applied when a model loads or a new chat starts)
+- Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts)
+- Stop words: end a reply as soon as one appears (applies immediately)
 - System prompt presets: four built in, plus your own
+- App lock: require fingerprint, face or screen lock; also hides the app in recent apps and blocks screenshots
+- Storage: see what PocketLM uses, clean up unused files, or delete all chats
+- Battery and heat warnings appear in the chat when the phone is warm or low on power
 
 ## Known limits
 
@@ -76,8 +87,9 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- Export and share chats, rename chats
+- Export and share whole chats
 - Local OpenAI-compatible API server
+- Voice input and read-aloud
 - Semantic document search with an embedding model, and PDF support
 - GPU / NPU acceleration
 - Smaller release builds

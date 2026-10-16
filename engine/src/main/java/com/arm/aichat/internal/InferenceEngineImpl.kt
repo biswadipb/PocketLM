@@ -87,7 +87,13 @@ internal class InferenceEngineImpl private constructor(
     private external fun load(modelPath: String): Int
 
     @FastNative
-    private external fun prepare(nCtx: Int, nThreads: Int, temp: Float, topP: Float): Int
+    private external fun prepare(
+        nCtx: Int, nThreads: Int, temp: Float, topP: Float,
+        topK: Int, minP: Float, repeatPenalty: Float, seed: Int,
+    ): Int
+
+    @FastNative
+    private external fun setGrammar(grammar: String): Int
 
     @FastNative
     private external fun loadProjector(path: String): Int
@@ -175,7 +181,10 @@ internal class InferenceEngineImpl private constructor(
                     // TODO-han.yin: find a better way to pass other error codes
                     if (it != 0) throw UnsupportedArchitectureException()
                 }
-                prepare(params.contextSize, params.threads, params.temperature, params.topP).let {
+                prepare(
+                    params.contextSize, params.threads, params.temperature, params.topP,
+                    params.topK, params.minP, params.repeatPenalty, params.seed,
+                ).let {
                     if (it != 0) throw IOException("Failed to prepare resources")
                 }
                 Log.i(TAG, "Model loaded!")
@@ -236,6 +245,14 @@ internal class InferenceEngineImpl private constructor(
     ): Flow<String> {
         require(File(imagePath).isFile) { "Image not found" }
         return generateReply { processUserPromptWithImage(message, imagePath, predictLength) }
+    }
+
+    override suspend fun setOutputGrammar(gbnf: String) {
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
+            val result = setGrammar(gbnf)
+            if (result != 0) Log.w(TAG, "Could not set the output grammar, code $result")
+        }
     }
 
     override suspend fun loadVisionProjector(pathToProjector: String): Boolean =

@@ -111,25 +111,65 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     return context;
 }
 
-static common_sampler *new_sampler(float temp, float top_p) {
+struct SamplerConfig {
+    float    temp           = 0.7f;
+    float    top_p          = 0.95f;
+    int      top_k          = 40;
+    float    min_p          = 0.05f;
+    float    repeat_penalty = 1.0f;
+    uint32_t seed           = LLAMA_DEFAULT_SEED;
+};
+
+static SamplerConfig g_sampler_config;
+static std::string   g_grammar; // GBNF constraining the output; empty means unconstrained
+
+static common_sampler *new_sampler() {
     common_params_sampling sparams;
-    sparams.temp = temp;
-    sparams.top_p = top_p;
+    sparams.temp           = g_sampler_config.temp;
+    sparams.top_p          = g_sampler_config.top_p;
+    sparams.top_k          = g_sampler_config.top_k;
+    sparams.min_p          = g_sampler_config.min_p;
+    sparams.penalty_repeat = g_sampler_config.repeat_penalty;
+    sparams.seed           = g_sampler_config.seed;
+    if (!g_grammar.empty()) {
+        sparams.grammar = common_grammar(COMMON_GRAMMAR_TYPE_USER, g_grammar);
+    }
     return common_sampler_init(g_model, sparams);
 }
 
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
-        JNIEnv * /*env*/, jobject /*unused*/, jint n_ctx, jint n_threads, jfloat temp, jfloat top_p) {
+        JNIEnv * /*env*/, jobject /*unused*/, jint n_ctx, jint n_threads, jfloat temp, jfloat top_p,
+        jint top_k, jfloat min_p, jfloat repeat_penalty, jint seed) {
     auto *context = init_context(g_model, n_ctx, n_threads);
     if (!context) { return 1; }
     g_context = context;
     g_n_ctx = (int) llama_n_ctx(context);
     g_batch = common_batch(context);
     g_chat_templates = common_chat_templates_init(g_model, "");
-    g_sampler = new_sampler(temp, top_p);
+    g_sampler_config = {temp, top_p, top_k, min_p, repeat_penalty,
+                        seed < 0 ? LLAMA_DEFAULT_SEED : (uint32_t) seed};
+    g_grammar.clear();
+    g_sampler = new_sampler();
     return 0;
+}
+
+/**
+ * Constrains all further output to [jgrammar] (GBNF), or lifts the constraint when it is empty.
+ * Safe between messages; the sampler is rebuilt.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_setGrammar(JNIEnv *env, jobject /*unused*/, jstring jgrammar) {
+    if (!g_model || !g_sampler) { return 1; }
+    const auto *grammar = env->GetStringUTFChars(jgrammar, nullptr);
+    g_grammar = grammar;
+    env->ReleaseStringUTFChars(jgrammar, grammar);
+
+    common_sampler_free(g_sampler);
+    g_sampler = new_sampler();
+    return g_sampler ? 0 : 2;
 }
 
 static std::string get_backend() {

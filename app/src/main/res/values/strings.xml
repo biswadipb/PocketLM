@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">PocketLM</string>
+    <string name="ask_label">Ask PocketLM</string>
+    <string name="ask_short">Ask</string>
+    <string name="widget_text">Ask PocketLM…</string>
+    <string name="widget_description">Opens PocketLM ready for your question</string>
 </resources>

@@ -17,13 +17,23 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Models, Search, Settings }
+private enum class Screen { Chat, History, Models, Search, Settings, Benchmark, Storage, Compare }
 
 @Composable
 fun PocketLmApp(vm: PocketViewModel = viewModel()) {
     var screen by rememberSaveable { mutableStateOf(Screen.Chat) }
     val error by vm.error.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    val incoming by vm.incomingText.collectAsStateWithLifecycle()
+
+    LaunchedEffect(incoming) {
+        if (incoming != null) screen = Screen.Chat
+    }
+
+    val askRequests by vm.askRequests.collectAsStateWithLifecycle()
+    LaunchedEffect(askRequests) {
+        if (askRequests > 0) screen = Screen.Chat
+    }
 
     LaunchedEffect(error) {
         error?.let {
@@ -33,7 +43,11 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
     }
 
     BackHandler(enabled = screen != Screen.Chat) {
-        screen = if (screen == Screen.Search) Screen.Models else Screen.Chat
+        screen = when (screen) {
+            Screen.Search -> Screen.Models
+            Screen.Benchmark, Screen.Storage, Screen.Compare -> Screen.Settings
+            else -> Screen.Chat
+        }
     }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
@@ -60,7 +74,22 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                 modifier = modifier,
             )
             Screen.Search -> SearchScreen(vm, onBack = { screen = Screen.Models }, modifier = modifier)
-            Screen.Settings -> SettingsScreen(vm, onBack = { screen = Screen.Chat }, modifier = modifier)
+            Screen.Settings -> SettingsScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpenBenchmark = { screen = Screen.Benchmark },
+                onOpenStorage = { screen = Screen.Storage },
+                onOpenCompare = { screen = Screen.Compare },
+                modifier = modifier,
+            )
+            Screen.Compare -> CompareScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
+            Screen.Benchmark -> BenchmarkScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
+            Screen.Storage -> StorageScreen(
+                vm,
+                onBack = { screen = Screen.Settings },
+                onOpenModels = { screen = Screen.Models },
+                modifier = modifier,
+            )
         }
     }
 }

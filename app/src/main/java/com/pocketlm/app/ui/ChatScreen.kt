@@ -1,5 +1,16 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Button
+import com.pocketlm.app.data.ModelCatalog
+import com.pocketlm.app.data.SavedPrompt
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
+import androidx.compose.runtime.remember
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -77,14 +88,72 @@ fun ChatScreen(
     val loading by vm.loading.collectAsStateWithLifecycle()
     val attachments by vm.attachments.collectAsStateWithLifecycle()
     val pendingImage by vm.pendingImage.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf<ChatMessage?>(null) }
+    val incoming by vm.incomingText.collectAsStateWithLifecycle()
+    val askRequests by vm.askRequests.collectAsStateWithLifecycle()
+    val inputFocus = remember { FocusRequester() }
+    val deviceStatus by vm.deviceStatus.collectAsStateWithLifecycle()
+    val presets by vm.presets.collectAsStateWithLifecycle()
+    val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
+    val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
+    val jsonMode by vm.jsonMode.collectAsStateWithLifecycle()
+    var showOptions by remember { mutableStateOf(false) }
+    val models by vm.models.collectAsStateWithLifecycle()
+    val prompts by vm.prompts.collectAsStateWithLifecycle()
+    var showPrompts by remember { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::attach)
     }
     val listState = rememberLazyListState()
 
+    LaunchedEffect(askRequests) {
+        if (askRequests > 0) runCatching { inputFocus.requestFocus() }
+    }
+
+    LaunchedEffect(incoming) {
+        incoming?.let {
+            input = if (input.isBlank()) it else input + "\n\n" + it
+            vm.consumeIncomingText()
+        }
+    }
+
+    if (showOptions) {
+        ChatOptionsDialog(
+            models = models,
+            loaded = loaded,
+            presets = presets,
+            chatPresetId = chatPresetId,
+            defaultPresetId = defaultPresetId,
+            jsonMode = jsonMode,
+            onModel = vm::switchModel,
+            onPreset = vm::setChatPreset,
+            onJsonMode = vm::setJsonMode,
+            onDismiss = { showOptions = false },
+        )
+    }
+
+    if (showPrompts) {
+        PromptLibraryDialog(
+            prompts = prompts,
+            currentText = input,
+            onInsert = { input = if (input.isBlank()) it else input + "\n" + it; showPrompts = false },
+            onSave = vm::savePrompt,
+            onDelete = vm::deletePrompt,
+            onDismiss = { showPrompts = false },
+        )
+    }
+
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+    }
+
+    editing?.let { message ->
+        EditMessageDialog(
+            initial = message.text,
+            onSend = { vm.editMessage(message.id, it); editing = null },
+            onDismiss = { editing = null },
+        )
     }
 
     Column(modifier.fillMaxSize().imePadding()) {
@@ -95,6 +164,9 @@ fun ChatScreen(
                     IconButton(onClick = vm::newChat, enabled = !generating && !loading) {
                         Icon(Icons.Filled.Refresh, contentDescription = "New chat")
                     }
+                }
+                IconButton(onClick = { showOptions = true }) {
+                    Icon(Icons.Filled.Tune, contentDescription = "Chat options")
                 }
                 IconButton(onClick = onOpenHistory) {
                     Icon(Icons.Filled.History, contentDescription = "History")
@@ -107,6 +179,17 @@ fun ChatScreen(
                 }
             },
         )
+
+        deviceStatus.warning?.let { warning ->
+            Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    warning,
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
@@ -127,7 +210,18 @@ fun ChatScreen(
                         Modifier.padding(vertical = 8.dp),
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    TextButton(onClick = onOpenModels) { Text("Choose a model") }
+                    if (models.isEmpty()) {
+                        Button(
+                            onClick = { vm.download(ModelCatalog.models.first()); onOpenModels() },
+                            Modifier.padding(top = 8.dp),
+                        ) { Text("Download a starter model (${ModelCatalog.models.first().sizeMb} MB)") }
+                        Text(
+                            "${ModelCatalog.models.first().name}: small and quick, a good first try.",
+                            Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    TextButton(onClick = onOpenModels) { Text(if (models.isEmpty()) "Browse other models" else "Choose a model") }
                 }
                 else -> LazyColumn(
                     state = listState,
@@ -137,6 +231,8 @@ fun ChatScreen(
                     items(messages, key = { it.id }) { message ->
                         MessageBubble(
                             message,
+                            canEdit = message.isUser && !generating && !loading && loaded != null,
+                            onEdit = { editing = message },
                             canRegenerate = message.id == messages.lastOrNull()?.id &&
                                 !message.isUser && !generating && !loading && messages.size >= 2,
                             onRegenerate = vm::regenerate,
@@ -193,10 +289,13 @@ fun ChatScreen(
             ) {
                 Icon(Icons.Filled.AttachFile, contentDescription = "Attach a text file or image")
             }
+            IconButton(onClick = { showPrompts = true }, enabled = !generating && !loading) {
+                Icon(Icons.Filled.Bookmarks, contentDescription = "Saved prompts")
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).focusRequester(inputFocus),
                 placeholder = { Text(if (loaded == null) "Load a model first" else "Message") },
                 enabled = loaded != null && !generating && !loading,
                 maxLines = 5,
@@ -219,7 +318,13 @@ fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, canRegenerate: Boolean, onRegenerate: () -> Unit) {
+private fun MessageBubble(
+    message: ChatMessage,
+    canEdit: Boolean,
+    onEdit: () -> Unit,
+    canRegenerate: Boolean,
+    onRegenerate: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
     Row(
@@ -242,6 +347,11 @@ private fun MessageBubble(message: ChatMessage, canRegenerate: Boolean, onRegene
                         )
                     }
                     if (message.isUser) Text(message.text) else MarkdownText(message.text)
+                    if (canEdit) {
+                        IconButton(onClick = onEdit, modifier = Modifier.align(Alignment.End)) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit message")
+                        }
+                    }
                     message.stats?.let {
                         Text(
                             statsLine(it),
@@ -266,8 +376,86 @@ private fun MessageBubble(message: ChatMessage, canRegenerate: Boolean, onRegene
     }
 }
 
-private fun statsLine(s: GenStats): String = buildList {
+internal fun statsLine(s: GenStats): String = buildList {
     s.tokensPerSecond?.let { add("%.1f tok/s".format(it)) }
     add("${s.tokens} tokens")
     add("%.1f s to first token".format(s.firstTokenMs / 1000f))
 }.joinToString(" · ")
+
+@Composable
+private fun EditMessageDialog(initial: String, onSend: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit message") },
+        text = {
+            Column {
+                OutlinedTextField(value = text, onValueChange = { text = it }, minLines = 2, maxLines = 8)
+                Text(
+                    "The model answers again, and everything after this message is removed.",
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSend(text) }, enabled = text.isNotBlank()) { Text("Send") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun PromptLibraryDialog(
+    prompts: List<SavedPrompt>,
+    currentText: String,
+    onInsert: (String) -> Unit,
+    onSave: (String, String) -> Unit,
+    onDelete: (SavedPrompt) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var title by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Saved prompts") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                prompts.forEach { p ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onInsert(p.text) }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(p.title, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                p.text.trim(),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (!p.builtIn) {
+                            IconButton(onClick = { onDelete(p) }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Delete ${p.title}")
+                            }
+                        }
+                    }
+                }
+                if (currentText.isNotBlank()) {
+                    OutlinedTextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        label = { Text("Save the message box as…") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    TextButton(
+                        onClick = { onSave(title, currentText); title = "" },
+                        enabled = title.isNotBlank(),
+                    ) { Text("Save prompt") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}

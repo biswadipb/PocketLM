@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import android.app.ActivityManager
+import android.content.Context
 import android.text.format.Formatter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -32,6 +34,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -45,6 +48,7 @@ import com.pocketlm.app.DownloadState
 import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.HfFile
 import com.pocketlm.app.data.HfModel
+import com.pocketlm.app.data.MemoryEstimate
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +58,13 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     val installed by vm.models.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
+    val gen by vm.generationParams.collectAsStateWithLifecycle()
+    val searchContext = LocalContext.current
+    val memory = remember {
+        ActivityManager.MemoryInfo().also {
+            (searchContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(it)
+        }
+    }
     var query by rememberSaveable { mutableStateOf(state.query) }
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -98,6 +109,10 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                             files = repoFiles[model.id],
                             downloads = downloads,
                             installedNames = (installed + projectors).map { it.fileName }.toSet(),
+                            fitFor = { file ->
+                                if (file.isProjector) null
+                                else MemoryEstimate.estimate(file.sizeBytes, null, gen.contextSize, memory.availMem, memory.totalMem)
+                            },
                             onToggle = {
                                 expanded = if (open) null else model.id
                                 if (!open) vm.loadRepoFiles(model.id)
@@ -126,6 +141,7 @@ private fun ModelCard(
     files: com.pocketlm.app.RepoFiles?,
     downloads: Map<String, DownloadState>,
     installedNames: Set<String>,
+    fitFor: (HfFile) -> MemoryEstimate.Result?,
     onToggle: () -> Unit,
     onDownload: (HfFile) -> Unit,
     onCancel: (String) -> Unit,
@@ -150,6 +166,7 @@ private fun ModelCard(
                             FileRow(
                                 file = file,
                                 installed = file.fileName in installedNames,
+                                fit = fitFor(file),
                                 progress = downloads[file.fileName],
                                 onDownload = { onDownload(file) },
                                 onCancel = { onCancel(file.fileName) },
@@ -166,6 +183,7 @@ private fun ModelCard(
 private fun FileRow(
     file: HfFile,
     installed: Boolean,
+    fit: MemoryEstimate.Result?,
     progress: DownloadState?,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
@@ -180,6 +198,13 @@ private fun FileRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (fit != null && fit.level != MemoryEstimate.Level.Comfortable) {
+                    Text(
+                        if (fit.level == MemoryEstimate.Level.TooBig) "Probably too big for this phone" else "Tight fit on this phone",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (fit.level == MemoryEstimate.Level.TooBig) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
+                    )
+                }
             }
             when {
                 progress != null -> TextButton(onClick = onCancel) { Text("Cancel") }

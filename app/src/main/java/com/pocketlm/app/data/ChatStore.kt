@@ -24,6 +24,13 @@ data class SavedChat(
     val modelFile: String?,
     val messages: List<StoredMessage>,
     val attachments: List<Attachment> = emptyList(),
+    val pinned: Boolean = false,
+    /** True once the user renamed the chat, so saving no longer derives the title from the first message. */
+    val customTitle: Boolean = false,
+    /** System prompt preset chosen for this chat; null means the app-wide default. */
+    val presetId: String? = null,
+    /** Whether replies in this chat are restricted to valid JSON. */
+    val jsonMode: Boolean = false,
 )
 
 /** Saves each conversation as a small JSON file in the app's private storage. */
@@ -45,6 +52,10 @@ class ChatStore(private val context: Context) {
             .put("title", chat.title)
             .put("updatedAt", chat.updatedAt)
             .put("modelFile", chat.modelFile ?: JSONObject.NULL)
+            .put("pinned", chat.pinned)
+            .put("customTitle", chat.customTitle)
+            .put("presetId", chat.presetId ?: JSONObject.NULL)
+            .put("jsonMode", chat.jsonMode)
             .put(
                 "attachments",
                 JSONArray(chat.attachments.map {
@@ -83,6 +94,10 @@ class ChatStore(private val context: Context) {
             title = o.getString("title"),
             updatedAt = o.getLong("updatedAt"),
             modelFile = if (o.isNull("modelFile")) null else o.getString("modelFile"),
+            pinned = o.optBoolean("pinned", false),
+            customTitle = o.optBoolean("customTitle", false),
+            presetId = if (o.isNull("presetId")) null else o.optString("presetId").ifEmpty { null },
+            jsonMode = o.optBoolean("jsonMode", false),
             attachments = List(att?.length() ?: 0) {
                 val a = att!!.getJSONObject(it)
                 Attachment(a.getString("id"), a.getString("name"), a.optInt("chars"))
