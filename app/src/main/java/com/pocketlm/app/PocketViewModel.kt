@@ -8,6 +8,9 @@ import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.CatalogModel
+import com.pocketlm.app.data.ChatStore
+import com.pocketlm.app.data.SavedChat
+import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.ui.ThemeMode
@@ -72,10 +75,6 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private var generationJob: Job? = null
     private val downloadJobs = mutableMapOf<String, Job>()
-
-    init {
-        refreshModels()
-    }
 
     fun dismissError() {
         _error.value = null
@@ -143,7 +142,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Inference -----------------------------------------------------------
 
-    fun load(model: LocalModel) {
+    /**
+     * Loads [model] into the engine. With [resetChat] the conversation is cleared too; opening a
+     * saved chat passes false so its messages stay on screen while the native context is rebuilt.
+     */
+    fun load(model: LocalModel, resetChat: Boolean = true) {
         if (_loading.value) return
         viewModelScope.launch {
             _loading.value = true
@@ -154,7 +157,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 engine.loadModel(model.path)
                 engine.setSystemPrompt(SYSTEM_PROMPT)
                 _loadedModel.value = model
-                _messages.value = emptyList()
+                if (resetChat) clearConversation()
             } catch (e: Exception) {
                 _loadedModel.value = null
                 _error.value = "Could not load ${model.fileName}: ${e.message ?: e::class.simpleName}"
@@ -168,23 +171,30 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         _loadedModel.value = null
-        _messages.value = emptyList()
+        clearConversation()
     }
 
-    /** Clears the conversation. The native context can only be reset by reloading the model. */
+    /** Starts a fresh chat. The native context can only be reset by reloading the model. */
     fun newChat() {
-        _loadedModel.value?.let(::load)
+        _loadedModel.value?.let { load(it) }
     }
 
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty() || _generating.value || _loadedModel.value == null) return
 
+        if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
+        // After reopening a saved chat the engine has no memory of it, so replay it once.
+        val enginePrompt = pendingContext?.let {
+            "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $prompt"
+        } ?: prompt
+        pendingContext = null
+
         _messages.update { it + ChatMessage(prompt, true) + ChatMessage("", false) }
         _generating.value = true
         generationJob = viewModelScope.launch {
             try {
-                engine.sendUserPrompt(prompt).collect { token ->
+                engine.sendUserPrompt(enginePrompt).collect { token ->
                     _messages.update { list ->
                         list.dropLast(1) + list.last().copy(text = list.last().text + token)
                     }
@@ -195,7 +205,73 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "Generation failed: ${e.message ?: e::class.simpleName}"
             } finally {
                 _generating.value = false
+                saveCurrentChat()
             }
+        }
+    }
+
+    // ---- Chat history --------------------------------------------------------
+
+    private val chatStore = ChatStore(app)
+    private var currentChatId: String? = null
+    private var pendingContext: String? = null
+
+    private val _chats = MutableStateFlow<List<SavedChat>>(emptyList())
+    val chats = _chats.asStateFlow()
+
+    fun refreshChats() {
+        viewModelScope.launch { _chats.value = chatStore.list() }
+    }
+
+    private fun clearConversation() {
+        currentChatId = null
+        pendingContext = null
+        _messages.value = emptyList()
+    }
+
+    private fun saveCurrentChat() {
+        val id = currentChatId ?: return
+        val msgs = _messages.value.filter { it.isUser || it.text.isNotEmpty() }
+        val firstUser = msgs.firstOrNull { it.isUser }?.text ?: return
+        val chat = SavedChat(
+            id = id,
+            title = firstUser.lineSequence().first().take(48),
+            updatedAt = System.currentTimeMillis(),
+            modelFile = _loadedModel.value?.fileName,
+            messages = msgs.map { StoredMessage(it.text, it.isUser) },
+        )
+        viewModelScope.launch {
+            chatStore.save(chat)
+            refreshChats()
+        }
+    }
+
+    /** Reopens a saved chat, reloading its model (or the current one) to get a clean context. */
+    fun openChat(chat: SavedChat) {
+        if (_loading.value) return
+        stopGeneration()
+        currentChatId = chat.id
+        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser) }
+        pendingContext = chat.messages.joinToString("\n") {
+            (if (it.isUser) "User: " else "Assistant: ") + it.text
+        }.takeLast(MAX_REPLAY_CHARS)
+
+        val model = _models.value.firstOrNull { it.fileName == chat.modelFile } ?: _loadedModel.value
+        if (model != null) {
+            load(model, resetChat = false)
+        } else {
+            _error.value = "Load a model to continue this chat"
+        }
+    }
+
+    fun deleteChat(chat: SavedChat) {
+        viewModelScope.launch {
+            chatStore.delete(chat.id)
+            if (currentChatId == chat.id) {
+                clearConversation()
+                _loadedModel.value?.let { load(it) }
+            }
+            refreshChats()
         }
     }
 
@@ -210,6 +286,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    init {
+        refreshModels()
+        refreshChats()
+    }
+
     override fun onCleared() {
         stopGeneration()
         super.onCleared()
@@ -217,6 +298,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_THEME = "theme_mode"
+        const val MAX_REPLAY_CHARS = 4000
         const val SYSTEM_PROMPT = "You are PocketLM, a helpful assistant running entirely on the user's phone."
     }
 }

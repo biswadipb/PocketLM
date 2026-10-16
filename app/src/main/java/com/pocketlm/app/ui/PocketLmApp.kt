@@ -17,7 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, Models, Settings }
+private enum class Screen { Chat, History, Models, Settings }
 
 @Composable
 fun PocketLmApp(vm: PocketViewModel = viewModel()) {
@@ -39,8 +39,15 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
         when (screen) {
             Screen.Chat -> ChatScreen(
                 vm,
+                onOpenHistory = { screen = Screen.History },
                 onOpenModels = { screen = Screen.Models },
                 onOpenSettings = { screen = Screen.Settings },
+                modifier = modifier,
+            )
+            Screen.History -> HistoryScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpened = { screen = Screen.Chat },
                 modifier = modifier,
             )
             Screen.Models -> ModelsScreen(

@@ -16,7 +16,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,6 +46,7 @@ import com.pocketlm.app.PocketViewModel
 @Composable
 fun ChatScreen(
     vm: PocketViewModel,
+    onOpenHistory: () -> Unit,
     onOpenModels: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -69,8 +71,11 @@ fun ChatScreen(
                         Icon(Icons.Filled.Refresh, contentDescription = "New chat")
                     }
                 }
+                IconButton(onClick = onOpenHistory) {
+                    Icon(Icons.Filled.History, contentDescription = "History")
+                }
                 IconButton(onClick = onOpenModels) {
-                    Icon(Icons.Filled.Storage, contentDescription = "Models")
+                    Icon(Icons.Filled.Hub, contentDescription = "Models")
                 }
                 IconButton(onClick = onOpenSettings) {
                     Icon(Icons.Filled.Settings, contentDescription = "Settings")
