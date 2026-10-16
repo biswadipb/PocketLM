@@ -53,6 +53,7 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
     val repoFiles by vm.repoFiles.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     val installed by vm.models.collectAsStateWithLifecycle()
+    val projectors by vm.projectors.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf(state.query) }
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -96,7 +97,7 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                             open = open,
                             files = repoFiles[model.id],
                             downloads = downloads,
-                            installedNames = installed.map { it.fileName }.toSet(),
+                            installedNames = (installed + projectors).map { it.fileName }.toSet(),
                             onToggle = {
                                 expanded = if (open) null else model.id
                                 if (!open) vm.loadRepoFiles(model.id)
@@ -175,7 +176,7 @@ private fun FileRow(
             Column(Modifier.weight(1f)) {
                 Text(file.fileName, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    listOfNotNull(file.quant, Formatter.formatShortFileSize(context, file.sizeBytes)).joinToString(" · "),
+                    listOfNotNull(if (file.isProjector) "Vision add-on" else file.quant, Formatter.formatShortFileSize(context, file.sizeBytes)).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -32,6 +32,22 @@ interface InferenceEngine {
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>
 
     /**
+     * Loads a multimodal projector (an "mmproj" GGUF) for the loaded model so it can read images.
+     * Call after [loadModel]. Returns false if the projector doesn't match or has no vision support.
+     */
+    suspend fun loadVisionProjector(pathToProjector: String): Boolean
+
+    /**
+     * Like [sendUserPrompt], but the model also sees the image at [imagePath].
+     * Requires a projector loaded with [loadVisionProjector].
+     */
+    fun sendUserPromptWithImage(
+        message: String,
+        imagePath: String,
+        predictLength: Int = DEFAULT_PREDICT_LENGTH,
+    ): Flow<String>
+
+    /**
      * Runs a benchmark with the specified parameters.
      */
     suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String

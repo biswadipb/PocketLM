@@ -4,7 +4,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.AttachFile
@@ -73,6 +76,7 @@ fun ChatScreen(
     val generating by vm.generating.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
     val attachments by vm.attachments.collectAsStateWithLifecycle()
+    val pendingImage by vm.pendingImage.collectAsStateWithLifecycle()
     var input by rememberSaveable { mutableStateOf("") }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::attach)
@@ -142,6 +146,21 @@ fun ChatScreen(
             }
         }
 
+        pendingImage?.let { path ->
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                Thumbnail(
+                    path,
+                    Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)),
+                    contentScale = ContentScale.Crop,
+                )
+                IconButton(
+                    onClick = vm::removePendingImage,
+                    modifier = Modifier.align(Alignment.TopEnd).size(24.dp),
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+                }
+            }
+        }
         if (attachments.isNotEmpty()) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
@@ -172,7 +191,7 @@ fun ChatScreen(
                 onClick = { picker.launch(arrayOf("*/*")) },
                 enabled = loaded != null && !generating && !loading,
             ) {
-                Icon(Icons.Filled.AttachFile, contentDescription = "Attach a text file")
+                Icon(Icons.Filled.AttachFile, contentDescription = "Attach a text file or image")
             }
             OutlinedTextField(
                 value = input,
@@ -190,7 +209,7 @@ fun ChatScreen(
             } else {
                 IconButton(
                     onClick = { vm.send(input); input = "" },
-                    enabled = loaded != null && !loading && input.isNotBlank(),
+                    enabled = loaded != null && !loading && (input.isNotBlank() || pendingImage != null),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                 }
@@ -216,6 +235,12 @@ private fun MessageBubble(message: ChatMessage, canRegenerate: Boolean, onRegene
                 CircularProgressIndicator(Modifier.padding(14.dp), strokeWidth = 2.dp)
             } else {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    message.imagePath?.let {
+                        Thumbnail(
+                            it,
+                            Modifier.padding(bottom = 8.dp).heightIn(max = 180.dp).clip(RoundedCornerShape(12.dp)),
+                        )
+                    }
                     if (message.isUser) Text(message.text) else MarkdownText(message.text)
                     message.stats?.let {
                         Text(

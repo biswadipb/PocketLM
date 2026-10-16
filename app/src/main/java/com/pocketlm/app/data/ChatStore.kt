@@ -10,7 +10,12 @@ import java.io.File
 /** Speed of one reply. [tokensPerSecond] is null when fewer than two tokens were produced. */
 data class GenStats(val tokens: Int, val tokensPerSecond: Float?, val firstTokenMs: Long)
 
-data class StoredMessage(val text: String, val isUser: Boolean, val stats: GenStats? = null)
+data class StoredMessage(
+    val text: String,
+    val isUser: Boolean,
+    val stats: GenStats? = null,
+    val imagePath: String? = null,
+)
 
 data class SavedChat(
     val id: String,
@@ -50,6 +55,7 @@ class ChatStore(private val context: Context) {
                 "messages",
                 JSONArray(chat.messages.map { m ->
                     JSONObject().put("text", m.text).put("isUser", m.isUser).apply {
+                        m.imagePath?.let { put("image", it) }
                         m.stats?.let {
                             put("tokens", it.tokens)
                             put("tps", it.tokensPerSecond?.toDouble() ?: JSONObject.NULL)
@@ -90,7 +96,12 @@ class ChatStore(private val context: Context) {
                         firstTokenMs = m.getLong("ttft"),
                     )
                 } else null
-                StoredMessage(m.getString("text"), m.getBoolean("isUser"), stats)
+                StoredMessage(
+                    m.getString("text"),
+                    m.getBoolean("isUser"),
+                    stats,
+                    if (m.has("image")) m.getString("image") else null,
+                )
             },
         )
     }

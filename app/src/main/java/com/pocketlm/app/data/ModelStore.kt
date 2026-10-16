@@ -20,8 +20,13 @@ class ModelStore(private val context: Context) {
     private val dir: File
         get() = File(context.filesDir, "models").also { it.mkdirs() }
 
-    suspend fun list(): List<LocalModel> = withContext(Dispatchers.IO) {
-        dir.listFiles { f -> f.isFile && f.name.endsWith(".gguf") }
+    suspend fun list(): List<LocalModel> = ggufFiles { !it.contains("mmproj", ignoreCase = true) }
+
+    /** Vision add-ons ("mmproj" files), kept apart from loadable models. */
+    suspend fun listProjectors(): List<LocalModel> = ggufFiles { it.contains("mmproj", ignoreCase = true) }
+
+    private suspend fun ggufFiles(accept: (String) -> Boolean): List<LocalModel> = withContext(Dispatchers.IO) {
+        dir.listFiles { f -> f.isFile && f.name.endsWith(".gguf") && accept(f.name) }
             .orEmpty()
             .sortedBy { it.name.lowercase() }
             .map { LocalModel(it.name, it.absolutePath, it.length()) }

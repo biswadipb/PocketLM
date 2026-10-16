@@ -16,8 +16,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,6 +36,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,6 +65,8 @@ fun ModelsScreen(
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
     val infos by vm.modelInfo.collectAsStateWithLifecycle()
+    val projectors by vm.projectors.collectAsStateWithLifecycle()
+    val projectorChoice by vm.projectorChoice.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var url by rememberSaveable { mutableStateOf("") }
 
@@ -94,6 +101,9 @@ fun ModelsScreen(
                     onLoad = { vm.load(m); onModelLoaded() },
                     onUnload = vm::unload,
                     onDelete = { vm.delete(m) },
+                    projectors = projectors,
+                    projector = projectorChoice[m.fileName],
+                    onProjector = { vm.setProjector(m, it) },
                 )
             }
             item {
@@ -107,8 +117,9 @@ fun ModelsScreen(
             items(ModelCatalog.models, key = { it.fileName }) { c ->
                 CatalogCard(
                     model = c,
-                    installed = models.any { it.fileName == c.fileName },
-                    progress = downloads[c.fileName],
+                    installed = models.any { it.fileName == c.fileName } &&
+                        (c.projectorFileName == null || projectors.any { it.fileName == c.projectorFileName }),
+                    progress = downloads[c.fileName] ?: c.projectorFileName?.let { downloads[it] },
                     onDownload = { vm.download(c) },
                     onCancel = { vm.cancelDownload(c.fileName) },
                 )
@@ -156,6 +167,9 @@ private fun LocalModelCard(
     onLoad: () -> Unit,
     onUnload: () -> Unit,
     onDelete: () -> Unit,
+    projectors: List<LocalModel>,
+    projector: String?,
+    onProjector: (String?) -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -193,6 +207,29 @@ private fun LocalModelCard(
                         Text(if (showDetails) "Hide details" else "Details")
                     }
                 }
+            }
+            if (projectors.isNotEmpty()) {
+                var menuOpen by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.Image, contentDescription = null)
+                        Text("  Vision: ${projector?.removeSuffix(".gguf") ?: "off"}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Off") }, onClick = { onProjector(null); menuOpen = false })
+                        projectors.forEach { p ->
+                            DropdownMenuItem(
+                                text = { Text(p.fileName) },
+                                onClick = { onProjector(p.fileName); menuOpen = false },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "Pick the add-on file made for this model. Applies the next time it loads.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

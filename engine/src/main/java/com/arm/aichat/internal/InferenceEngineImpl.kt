@@ -90,6 +90,12 @@ internal class InferenceEngineImpl private constructor(
     private external fun prepare(nCtx: Int, nThreads: Int, temp: Float, topP: Float): Int
 
     @FastNative
+    private external fun loadProjector(path: String): Int
+
+    @FastNative
+    private external fun processUserPromptWithImage(prompt: String, imagePath: String, nPredict: Int): Int
+
+    @FastNative
     private external fun systemInfo(): String
 
     @FastNative
@@ -218,8 +224,34 @@ internal class InferenceEngineImpl private constructor(
     override fun sendUserPrompt(
         message: String,
         predictLength: Int,
-    ): Flow<String> = flow {
+    ): Flow<String> {
         require(message.isNotEmpty()) { "User prompt discarded due to being empty!" }
+        return generateReply { processUserPrompt(message, predictLength) }
+    }
+
+    override fun sendUserPromptWithImage(
+        message: String,
+        imagePath: String,
+        predictLength: Int,
+    ): Flow<String> {
+        require(File(imagePath).isFile) { "Image not found" }
+        return generateReply { processUserPromptWithImage(message, imagePath, predictLength) }
+    }
+
+    override suspend fun loadVisionProjector(pathToProjector: String): Boolean =
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) {
+                "Load the model before its vision projector"
+            }
+            val result = loadProjector(pathToProjector)
+            if (result != 0) Log.w(TAG, "Vision projector not loaded, code $result")
+            result == 0
+        }
+
+    /**
+     * Runs [processPrompt] on the native side, then streams the generated tokens.
+     */
+    private fun generateReply(processPrompt: () -> Int): Flow<String> = flow {
         check(_state.value is InferenceEngine.State.ModelReady) {
             "User prompt discarded due to: ${_state.value.javaClass.simpleName}"
         }
@@ -229,9 +261,10 @@ internal class InferenceEngineImpl private constructor(
             _readyForSystemPrompt = false
             _state.value = InferenceEngine.State.ProcessingUserPrompt
 
-            processUserPrompt(message, predictLength).let { result ->
+            processPrompt().let { result ->
                 if (result != 0) {
                     Log.e(TAG, "Failed to process user prompt: $result")
+                    _state.value = InferenceEngine.State.ModelReady
                     return@flow
                 }
             }

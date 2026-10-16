@@ -32,6 +32,8 @@ endif()
 
 set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../third_party/llama.cpp)
 add_subdirectory(${LLAMA_SRC} build-llama)
+# Multimodal (vision) support lives in llama.cpp's tools/, which the main build skips.
+add_subdirectory(${LLAMA_SRC}/tools/mtmd build-mtmd)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
         ai_chat.cpp)
@@ -47,10 +49,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${LLAMA_SRC}/common
         ${LLAMA_SRC}/include
         ${LLAMA_SRC}/ggml/include
-        ${LLAMA_SRC}/ggml/src)
+        ${LLAMA_SRC}/ggml/src
+        ${LLAMA_SRC}/tools/mtmd)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         llama
         llama-common
+        mtmd
         android
         log)

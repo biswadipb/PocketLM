@@ -21,6 +21,8 @@ import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
+import com.pocketlm.app.data.ImageStore
+import com.pocketlm.app.data.ModelCatalog
 import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
@@ -46,6 +48,7 @@ data class ChatMessage(
     val isUser: Boolean,
     val id: String = UUID.randomUUID().toString(),
     val stats: GenStats? = null,
+    val imagePath: String? = null,
 )
 
 data class SearchState(
@@ -161,6 +164,59 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _error.value = null
     }
 
+    // ---- Vision -----------------------------------------------------------------
+
+    private val imageStore = ImageStore(app)
+
+    private val _projectors = MutableStateFlow<List<LocalModel>>(emptyList())
+    val projectors = _projectors.asStateFlow()
+
+    private val _projectorChoice = MutableStateFlow(
+        prefs.all.filterKeys { it.startsWith(KEY_PROJECTOR) }
+            .mapKeys { it.key.removePrefix(KEY_PROJECTOR) }
+            .mapNotNull { (k, v) -> (v as? String)?.let { k to it } }
+            .toMap()
+    )
+
+    /** Which projector file each model uses, by file name. Applies the next time the model loads. */
+    val projectorChoice = _projectorChoice.asStateFlow()
+
+    fun setProjector(model: LocalModel, projectorFileName: String?) {
+        _projectorChoice.update { if (projectorFileName == null) it - model.fileName else it + (model.fileName to projectorFileName) }
+        prefs.edit().apply {
+            if (projectorFileName == null) remove(KEY_PROJECTOR + model.fileName)
+            else putString(KEY_PROJECTOR + model.fileName, projectorFileName)
+        }.apply()
+    }
+
+    private val _visionReady = MutableStateFlow(false)
+
+    /** True when the loaded model has a working projector, so images can be sent. */
+    val visionReady = _visionReady.asStateFlow()
+
+    private val _pendingImage = MutableStateFlow<String?>(null)
+    val pendingImage = _pendingImage.asStateFlow()
+
+    private fun attachImage(uri: Uri) {
+        if (!_visionReady.value) {
+            _error.value = "This model can't read images. Load a vision model and pick its projector in Models."
+            return
+        }
+        viewModelScope.launch {
+            try {
+                _pendingImage.value?.let { imageStore.delete(it) }
+                _pendingImage.value = imageStore.import(uri)
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Could not attach the image"
+            }
+        }
+    }
+
+    fun removePendingImage() {
+        _pendingImage.value?.let { path -> viewModelScope.launch { imageStore.delete(path) } }
+        _pendingImage.value = null
+    }
+
     private val _modelInfo = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
 
     /** GGUF header details keyed by model path; filled in after the file list loads. */
@@ -170,6 +226,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val list = store.list()
             _models.value = list
+            _projectors.value = store.listProjectors()
+            // A catalog vision model comes with its own projector: pair them automatically.
+            ModelCatalog.models.forEach { c ->
+                val projector = c.projectorFileName ?: return@forEach
+                val model = list.firstOrNull { it.fileName == c.fileName } ?: return@forEach
+                if (_projectors.value.any { it.fileName == projector } && model.fileName !in _projectorChoice.value) {
+                    setProjector(model, projector)
+                }
+            }
             list.filter { it.path !in _modelInfo.value }.forEach { m ->
                 ModelInfo.read(m.path)?.let { info -> _modelInfo.update { it + (m.path to info) } }
             }
@@ -178,7 +243,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Model management -------------------------------------------------
 
-    fun download(model: CatalogModel) = startDownload(model.url, model.fileName)
+    fun download(model: CatalogModel) {
+        startDownload(model.url, model.fileName)
+        if (model.projectorUrl != null && model.projectorFileName != null) {
+            startDownload(model.projectorUrl, model.projectorFileName)
+        }
+    }
 
     fun downloadFromUrl(url: String) {
         val name = url.substringBefore('?').substringAfterLast('/')
@@ -307,12 +377,24 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         engine.loadModel(model.path, _generationParams.value)
         engine.setSystemPrompt(selectedPrompt)
         _loadedModel.value = model
+
+        _visionReady.value = false
+        val projector = _projectorChoice.value[model.fileName]?.let { name ->
+            _projectors.value.firstOrNull { it.fileName == name }
+        }
+        if (projector != null) {
+            _visionReady.value = engine.loadVisionProjector(projector.path)
+            if (!_visionReady.value) {
+                _error.value = "${projector.fileName} doesn't work with ${model.fileName}. Images are off."
+            }
+        }
     }
 
     fun unload() {
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         _loadedModel.value = null
+        _visionReady.value = false
         clearConversation()
     }
 
@@ -322,12 +404,14 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun send(text: String) {
-        val prompt = text.trim()
+        val image = _pendingImage.value
+        val prompt = text.trim().ifEmpty { if (image != null) "Describe this image." else "" }
         if (prompt.isEmpty() || _generating.value || _loadedModel.value == null) return
 
         if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
-        _messages.update { it + ChatMessage(prompt, true) }
-        startGeneration(prompt)
+        _pendingImage.value = null
+        _messages.update { it + ChatMessage(prompt, true, imagePath = image) }
+        startGeneration(prompt, image)
     }
 
     /** Re-asks the last user message. The engine can't undo a reply, so its context is rebuilt first. */
@@ -337,6 +421,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val msgs = _messages.value
         if (msgs.size < 2 || msgs.last().isUser || !msgs[msgs.lastIndex - 1].isUser) return
         val prompt = msgs[msgs.lastIndex - 1].text
+        val image = msgs[msgs.lastIndex - 1].imagePath
         val prior = msgs.dropLast(2)
 
         viewModelScope.launch {
@@ -350,9 +435,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 _loading.value = false
             }
-            _messages.value = prior + ChatMessage(prompt, true)
+            _messages.value = prior + ChatMessage(prompt, true, imagePath = image)
             pendingContext = replayText(prior.map { it.isUser to it.text })
-            startGeneration(prompt)
+            startGeneration(prompt, image)
         }
     }
 
@@ -362,7 +447,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             ?.takeLast(MAX_REPLAY_CHARS)
 
     /** Streams a reply to [prompt], which must already be the last message in the list. */
-    private fun startGeneration(prompt: String) {
+    private fun startGeneration(prompt: String, imagePath: String? = null) {
         // After reopening a saved chat the engine has no memory of it, so replay it once.
         val question = withDocumentContext(prompt)
         val enginePrompt = pendingContext?.let {
@@ -377,7 +462,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             var firstAt = 0L
             var count = 0
             try {
-                engine.sendUserPrompt(enginePrompt).collect { token ->
+                val reply = if (imagePath != null && _visionReady.value) {
+                    engine.sendUserPromptWithImage(enginePrompt, imagePath)
+                } else {
+                    engine.sendUserPrompt(enginePrompt)
+                }
+                reply.collect { token ->
                     if (count == 0) firstAt = SystemClock.elapsedRealtime()
                     count++
                     _messages.update { list ->
@@ -412,6 +502,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private var docIndex: Bm25Index? = null
 
     fun attach(uri: Uri) {
+        if (getApplication<Application>().contentResolver.getType(uri)?.startsWith("image/") == true) {
+            attachImage(uri)
+            return
+        }
         viewModelScope.launch {
             try {
                 val doc = docStore.import(uri)
@@ -467,6 +561,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             // Nothing was saved for this chat, so its attachments would be orphaned.
             _attachments.value.forEach { a -> viewModelScope.launch { docStore.delete(a.id) } }
         }
+        removePendingImage()
         _attachments.value = emptyList()
         docIndex = null
         currentChatId = null
@@ -483,7 +578,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             title = firstUser.lineSequence().first().take(48),
             updatedAt = System.currentTimeMillis(),
             modelFile = _loadedModel.value?.fileName,
-            messages = msgs.map { StoredMessage(it.text, it.isUser, it.stats) },
+            messages = msgs.map { StoredMessage(it.text, it.isUser, it.stats, it.imagePath) },
             attachments = _attachments.value,
         )
         viewModelScope.launch {
@@ -497,7 +592,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (_loading.value) return
         stopGeneration()
         currentChatId = chat.id
-        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats) }
+        _messages.value = chat.messages.map { ChatMessage(it.text, it.isUser, stats = it.stats, imagePath = it.imagePath) }
         pendingContext = replayText(chat.messages.map { it.isUser to it.text })
         _attachments.value = chat.attachments
         viewModelScope.launch { rebuildDocIndex() }
@@ -514,6 +609,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             chatStore.delete(chat.id)
             chat.attachments.forEach { docStore.delete(it.id) }
+            chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
             if (currentChatId == chat.id) {
                 clearConversation()
                 _loadedModel.value?.let { load(it) }
@@ -546,6 +642,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val KEY_THEME = "theme_mode"
         const val KEY_PRESETS = "custom_presets"
+        const val KEY_PROJECTOR = "projector_for_"
         const val KEY_PRESET_ID = "selected_preset"
         const val KEY_CTX = "gen_context_size"
         const val KEY_THREADS = "gen_threads"

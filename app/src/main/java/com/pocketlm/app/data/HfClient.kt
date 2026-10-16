@@ -14,6 +14,9 @@ data class HfModel(val id: String, val downloads: Long, val likes: Long)
 data class HfFile(val path: String, val sizeBytes: Long) {
     val fileName: String get() = path.substringAfterLast('/')
 
+    /** A vision add-on ("mmproj") that must be paired with a model, not a model by itself. */
+    val isProjector: Boolean get() = fileName.contains("mmproj", ignoreCase = true)
+
     /** Quantisation label such as Q4_K_M, taken from the file name when present. */
     val quant: String?
         get() = QUANT_REGEX.find(fileName)?.value?.uppercase()
@@ -27,7 +30,7 @@ data class HfFile(val path: String, val sizeBytes: Long) {
 object HfClient {
     private const val BASE = "https://huggingface.co"
 
-    // Split models (…-00001-of-00003.gguf) and vision projectors can't be used on their own.
+    // Split models (…-00001-of-00003.gguf) can't be used on their own.
     private val SPLIT = Regex("""-\d{5}-of-\d{5}\.gguf$""")
 
     suspend fun search(query: String): List<HfModel> = withContext(Dispatchers.IO) {
@@ -52,11 +55,11 @@ object HfClient {
             val o: JSONObject = arr.getJSONObject(i)
             val path = o.optString("path")
             if (o.optString("type") != "file" || !path.endsWith(".gguf")) continue
-            if (path.contains("mmproj", ignoreCase = true) || SPLIT.containsMatchIn(path)) continue
+            if (SPLIT.containsMatchIn(path)) continue
             val size = o.optJSONObject("lfs")?.optLong("size") ?: o.optLong("size")
             files += HfFile(path, size)
         }
-        files.sortedBy { it.sizeBytes }
+        files.sortedWith(compareBy({ it.isProjector }, { it.sizeBytes }))
     }
 
     fun downloadUrl(repoId: String, path: String) = "$BASE/$repoId/resolve/main/$path"

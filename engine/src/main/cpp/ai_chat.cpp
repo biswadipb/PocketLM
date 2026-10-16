@@ -10,6 +10,8 @@
 #include "chat.h"
 #include "common.h"
 #include "llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 template<class T>
 static std::string join(const std::vector<T> &values, const std::string &delim) {
@@ -33,12 +35,14 @@ constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
 constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
 
+static int                                g_n_ctx = DEFAULT_CONTEXT_SIZE;
 static llama_model                      * g_model;
 static llama_context                    * g_context;
-static int                                g_n_ctx = DEFAULT_CONTEXT_SIZE;
 static common_batch                       g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
+static mtmd_context                     * g_mtmd = nullptr;
+static int                                g_n_threads = 4;
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -86,6 +90,7 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
             ? std::min(requested_threads, n_cores)
             : std::max(N_THREADS_MIN, std::min(N_THREADS_MAX, n_cores - N_THREADS_HEADROOM));
     LOGi("%s: Using %d threads", __func__, n_threads);
+    g_n_threads = n_threads;
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
@@ -120,12 +125,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
     auto *context = init_context(g_model, n_ctx, n_threads);
     if (!context) { return 1; }
     g_context = context;
+    g_n_ctx = (int) llama_n_ctx(context);
     g_batch = common_batch(context);
     g_chat_templates = common_chat_templates_init(g_model, "");
     g_sampler = new_sampler(temp, top_p);
     return 0;
 }
-    g_n_ctx = (int) llama_n_ctx(context);
 
 static std::string get_backend() {
     std::vector<std::string> backends;
@@ -454,6 +459,93 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     return 0;
 }
 
+/**
+ * Vision: a multimodal projector (mmproj GGUF) lets the loaded model read images.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_loadProjector(JNIEnv *env, jobject /*unused*/, jstring jpath) {
+    if (!g_model) { return 1; }
+    if (g_mtmd) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+    }
+
+    const auto *path = env->GetStringUTFChars(jpath, nullptr);
+    mtmd_context_params params = mtmd_context_params_default();
+    params.use_gpu = false;
+    params.print_timings = false;
+    params.warmup = false;
+    params.n_threads = g_n_threads;
+    g_mtmd = mtmd_init_from_file(path, g_model, params);
+    env->ReleaseStringUTFChars(jpath, path);
+
+    if (!g_mtmd) { return 2; }
+    if (!mtmd_support_vision(g_mtmd)) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+        return 3;
+    }
+    return 0;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
+        JNIEnv *env,
+        jobject /*unused*/,
+        jstring juser_prompt,
+        jstring jimage_path,
+        jint n_predict
+) {
+    reset_short_term_states();
+    if (!g_mtmd) { return 1; }
+
+    const auto *const user_prompt = env->GetStringUTFChars(juser_prompt, nullptr);
+    const std::string content = std::string(mtmd_get_marker(g_mtmd)) + "\n" + user_prompt;
+    env->ReleaseStringUTFChars(juser_prompt, user_prompt);
+
+    const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    const std::string formatted = has_chat_template ? chat_add_and_format(ROLE_USER, content) : content;
+
+    const auto *const image_path = env->GetStringUTFChars(jimage_path, nullptr);
+    mtmd_helper_bitmap_wrapper wrapper =
+            mtmd_helper_bitmap_init_from_file(g_mtmd, image_path, false, mtmd_helper_init_opt_default());
+    env->ReleaseStringUTFChars(jimage_path, image_path);
+    if (!wrapper.bitmap) {
+        LOGe("%s: could not decode the image", __func__);
+        return 2;
+    }
+
+    mtmd_input_text text{formatted.c_str(), formatted.size(), current_position == 0, true};
+    const mtmd_bitmap *bitmaps[1] = {wrapper.bitmap};
+    mtmd_input_chunks *chunks = mtmd_input_chunks_init();
+
+    int result = 0;
+    if (mtmd_tokenize(g_mtmd, chunks, &text, bitmaps, 1) != 0) {
+        LOGe("%s: mtmd_tokenize failed", __func__);
+        result = 3;
+    } else if (current_position + (llama_pos) mtmd_helper_get_n_tokens(chunks) >= g_n_ctx - OVERFLOW_HEADROOM) {
+        LOGe("%s: image does not fit in the remaining context", __func__);
+        result = 4;
+    } else {
+        llama_pos new_position = current_position;
+        if (mtmd_helper_eval_chunks(g_mtmd, g_context, chunks, current_position, 0, BATCH_SIZE,
+                                    true, &new_position) != 0) {
+            LOGe("%s: mtmd_helper_eval_chunks failed", __func__);
+            result = 5;
+        } else {
+            current_position = new_position;
+            stop_generation_position = current_position + n_predict;
+        }
+    }
+
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(wrapper.bitmap);
+    if (wrapper.video_ctx) { mtmd_helper_video_free(wrapper.video_ctx); }
+    return result;
+}
+
 static bool is_valid_utf8(const char *string) {
     if (!string) { return true; }
 
@@ -556,6 +648,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     reset_short_term_states();
 
     // Free up resources
+    if (g_mtmd) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+    }
     common_sampler_free(g_sampler);
     g_chat_templates.reset();
     g_batch = common_batch();
