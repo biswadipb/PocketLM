@@ -38,6 +38,11 @@ interface InferenceEngine {
     suspend fun resetConversation(systemPrompt: String)
 
     /**
+     * Changes the temperature and top-p for further replies without reloading the model. Call between messages.
+     */
+    suspend fun updateSampling(temperature: Float, topP: Float)
+
+    /**
      * Constrains further output to a GBNF grammar (for example valid JSON), or lifts the
      * constraint when [gbnf] is empty. Call between messages.
      */

@@ -97,6 +97,9 @@ internal class InferenceEngineImpl private constructor(
     private external fun setGrammar(grammar: String): Int
 
     @FastNative
+    private external fun setSampling(temperature: Float, topP: Float): Int
+
+    @FastNative
     private external fun loadProjector(path: String): Int
 
     @FastNative
@@ -264,6 +267,14 @@ internal class InferenceEngineImpl private constructor(
                 }
             }
             _state.value = InferenceEngine.State.ModelReady
+        }
+    }
+
+    override suspend fun updateSampling(temperature: Float, topP: Float) {
+        withContext(llamaDispatcher) {
+            check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
+            val result = setSampling(temperature, topP)
+            if (result != 0) Log.w(TAG, "Could not change the sampling, code $result")
         }
     }
 

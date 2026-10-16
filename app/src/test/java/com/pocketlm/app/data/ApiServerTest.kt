@@ -154,6 +154,60 @@ class ApiServerTest {
     }
 
     @Test
+    fun aStopSequenceEndsTheReplyBeforeIt() {
+        // The fake model says "Hel" "lo" " there"; stopping at "lo t" leaves "Hel".
+        val r = call("POST", "/v1/chat/completions", """{"stop":"lo t","messages":[{"role":"user","content":"hi"}]}""")
+        val choice = JSONObject(r.body).getJSONArray("choices").getJSONObject(0)
+        assertEquals("Hel", choice.getJSONObject("message").getString("content"))
+        assertEquals("stop", choice.getString("finish_reason"))
+        assertEquals(listOf("lo t"), backend.last?.stop)
+    }
+
+    @Test
+    fun streamingNeverSendsAPartOfAStopSequence() {
+        val r = call("POST", "/v1/chat/completions", """{"stream":true,"stop":["lo"],"messages":[{"role":"user","content":"hi"}]}""")
+        val events = r.body.split("\n\n").filter { it.startsWith("data: ") }.map { it.removePrefix("data: ") }
+        val text = events.dropLast(1).map { JSONObject(it).getJSONArray("choices").getJSONObject(0).getJSONObject("delta").optString("content") }.joinToString("")
+        assertEquals("Hel", text)
+    }
+
+    @Test
+    fun samplingOptionsReachTheBackendAndAreKeptInRange() {
+        call("POST", "/v1/chat/completions", """{"temperature":0.2,"top_p":0.5,"messages":[{"role":"user","content":"hi"}]}""")
+        assertEquals(0.2f, backend.last?.temperature)
+        assertEquals(0.5f, backend.last?.topP)
+        call("POST", "/v1/chat/completions", """{"temperature":9,"top_p":0,"messages":[{"role":"user","content":"hi"}]}""")
+        assertEquals(2f, backend.last?.temperature)
+        assertEquals(0.01f, backend.last?.topP)
+        call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"hi"}]}""")
+        assertEquals(null, backend.last?.temperature)
+    }
+
+    @Test
+    fun theTextCompletionsEndpointUsesTheTextLayout() {
+        val r = call("POST", "/v1/completions", """{"prompt":"Say hi","max_tokens":10}""")
+        assertEquals(200, r.status)
+        val json = JSONObject(r.body)
+        assertEquals("text_completion", json.getString("object"))
+        assertEquals("Hello there", json.getJSONArray("choices").getJSONObject(0).getString("text"))
+        assertEquals("Say hi", backend.last?.messages?.single()?.content)
+    }
+
+    @Test
+    fun streamingTextCompletionsUseTextChunks() {
+        val r = call("POST", "/v1/completions", """{"prompt":["Say hi"],"stream":true}""")
+        val events = r.body.split("\n\n").filter { it.startsWith("data: ") }.map { it.removePrefix("data: ") }
+        assertEquals("[DONE]", events.last())
+        val text = events.dropLast(1).joinToString("") { JSONObject(it).getJSONArray("choices").getJSONObject(0).getString("text") }
+        assertEquals("Hello there", text)
+    }
+
+    @Test
+    fun aCompletionWithoutAPromptIsRejected() {
+        assertEquals(400, call("POST", "/v1/completions", """{"max_tokens":5}""").status)
+    }
+
+    @Test
     fun badRequestsGetClearErrors() {
         assertEquals(400, call("POST", "/v1/chat/completions", "not json").status)
         assertEquals(400, call("POST", "/v1/chat/completions", """{"messages":[{"role":"system","content":"x"}]}""").status)

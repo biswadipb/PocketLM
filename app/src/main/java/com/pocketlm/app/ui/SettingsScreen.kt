@@ -15,11 +15,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import com.pocketlm.app.ApiStatus
+import com.pocketlm.app.data.IdlePolicy
 import com.pocketlm.app.data.LocalNetwork
 import com.pocketlm.app.data.ToolId
 import androidx.compose.material3.AlertDialog
@@ -71,6 +74,7 @@ fun SettingsScreen(
     val readAloud by vm.readAloud.collectAsStateWithLifecycle()
     val backgroundReplies by vm.backgroundReplies.collectAsStateWithLifecycle()
     val enabledTools by vm.enabledTools.collectAsStateWithLifecycle()
+    val idleMinutes by vm.idleMinutes.collectAsStateWithLifecycle()
     val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
@@ -178,6 +182,46 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            SectionTitle("Backup", Modifier.padding(top = 24.dp))
+            Text(
+                "Save your chats (with their photos and attached files), saved prompts, presets and settings in one file, " +
+                    "and load them on this or another phone. Downloaded models are not included, and neither are the API key or app lock.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val backupSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+                uri?.let(vm::exportBackup)
+            }
+            val backupPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                uri?.let(vm::importBackup)
+            }
+            Row(Modifier.padding(top = 4.dp)) {
+                TextButton(onClick = { backupSaver.launch("pocketlm-backup-${java.time.LocalDate.now()}.zip") }) { Text("Back up") }
+                TextButton(onClick = { backupPicker.launch(arrayOf("application/zip", "application/octet-stream")) }) { Text("Restore") }
+            }
+
+            SectionTitle("Memory", Modifier.padding(top = 24.dp))
+            Text(
+                "Unload the model after you stop using it, so its memory goes back to your phone. " +
+                    "Your chat stays open and the model loads again when you send a message.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(Modifier.selectableGroup().padding(top = 4.dp)) {
+                IdlePolicy.choices.forEach { minutes ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .selectable(selected = minutes == idleMinutes, onClick = { vm.setIdleMinutes(minutes) }, role = Role.RadioButton)
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = minutes == idleMinutes, onClick = null)
+                        Text(IdlePolicy.label(minutes), Modifier.padding(start = 12.dp))
+                    }
+                }
             }
 
             SectionTitle("Model tools", Modifier.padding(top = 24.dp))

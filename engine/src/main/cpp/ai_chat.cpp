@@ -156,6 +156,33 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
 }
 
 /**
+ * Changes the temperature and top-p used from now on, keeping the other sampler settings.
+ * Safe between messages; the sampler is rebuilt, and the old one is kept if that fails.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_setSampling(JNIEnv * /*env*/, jobject /*unused*/, jfloat temp, jfloat top_p) {
+    if (!g_model || !g_sampler) { return 1; }
+    const SamplerConfig previous = g_sampler_config;
+    g_sampler_config.temp = temp;
+    g_sampler_config.top_p = top_p;
+
+    common_sampler *fresh = nullptr;
+    try {
+        fresh = new_sampler();
+    } catch (...) {
+        fresh = nullptr;
+    }
+    if (!fresh) {
+        g_sampler_config = previous;
+        return 2;
+    }
+    common_sampler_free(g_sampler);
+    g_sampler = fresh;
+    return 0;
+}
+
+/**
  * Constrains all further output to [jgrammar] (GBNF), or lifts the constraint when it is empty.
  * Safe between messages; the sampler is rebuilt.
  */

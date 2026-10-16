@@ -11,6 +11,9 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
 
+/** The PDF opened fine but has no text layer, so it is probably scanned pages. */
+class ScannedPdfException : IOException("No text found in that PDF. It may be scanned pages.")
+
 /** Pulls the text out of a PDF so it can be searched like any other attached document. */
 object PdfText {
 
@@ -46,9 +49,7 @@ object PdfText {
                 endPage = minOf(doc.numberOfPages, MAX_PAGES)
             }
             val text = tidy(stripper.getText(doc)).take(MAX_CHARS)
-            if (text.isBlank()) {
-                throw IOException("No text found in that PDF. It may be scanned pages, which PocketLM can't read yet.")
-            }
+            if (text.isBlank()) throw ScannedPdfException()
             text
         }
     }

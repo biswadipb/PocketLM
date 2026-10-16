@@ -35,7 +35,8 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 
 **Documents**
 - Attach text files (txt, md, csv, json, code) or PDFs to a chat and ask questions about them
-- PDFs are read as text; scanned pages (images of text) are not supported
+- PDFs are read as text; scanned PDFs (pictures of pages) are read with on-device text recognition, up to 40 pages
+- A photo attached while the loaded model can't see images is turned into text the same way and attached as a document
 - Relevant excerpts are found with BM25 keyword search, so no embedding model is needed
 - Attachments are saved with the chat
 
@@ -45,7 +46,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Hugging Face search lists vision add-ons next to models
 
 **Local API server**
-- Turn on an OpenAI-compatible server (`/v1/models`, `/v1/chat/completions`, with streaming) so other apps on your Wi-Fi can use the loaded model
+- Turn on an OpenAI-compatible server (`/v1/models`, `/v1/chat/completions` and `/v1/completions`, with streaming; per-request `temperature`, `top_p`, `max_tokens` and `stop` are honoured) so other apps on your Wi-Fi can use the loaded model
 - Protected by an API key (sent as `Authorization: Bearer <key>`); the port is configurable
 - Serves one request at a time and restores your chat afterwards. Earlier turns in a request are replayed inside the prompt rather than through the model's chat template
 
@@ -57,6 +58,8 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 
 **Settings**
 - Light, dark, or follow-system theme
+- Backup and restore: one zip with your chats (with photos and attached files), saved prompts, presets and settings; the API key, app lock and downloaded models are left out
+- Free memory when idle: unload the model after 5 to 60 minutes of inactivity; it loads again when you send a message (off by default)
 - Model tools: let the model use a calculator, the date and time, or a Wikipedia lookup while it answers (off by default; the model asks with a short tag, the app runs the tool and hands back the result)
 - Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts)
 - Stop words: end a reply as soon as one appears (applies immediately)
@@ -67,7 +70,7 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 
 ## Known limits
 
-- PDF text extraction is untested on a device; scanned PDFs have no text to read
+- PDF text extraction and text recognition (OCR) are untested on a device; OCR reads printed Latin-alphabet text only
 - Tool use depends on the model following a text format, which small models do inconsistently
 - One image per message, shrunk to 1024 px on the long side; earlier images are not re-shown to the model after a chat is reopened or a reply is regenerated
 - Document search matches keywords, not meaning, so a question worded differently from the document may miss
@@ -114,8 +117,8 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- More tools (web search), and API features such as temperature per request
-- Semantic document search with an embedding model, and reading scanned PDFs
+- More tools (web search)
+- Semantic document search with an embedding model, and more OCR languages
 - GPU / NPU acceleration
 
 ## License

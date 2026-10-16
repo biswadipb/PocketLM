@@ -20,7 +20,18 @@ import java.util.concurrent.Semaphore
 
 data class ApiMessage(val role: String, val content: String)
 
-data class ChatRequest(val messages: List<ApiMessage>, val stream: Boolean, val maxTokens: Int?)
+/**
+ * One request to answer. [temperature] and [topP] are null unless the caller chose them; [stop] are
+ * sequences that end the reply (and are not included in it).
+ */
+data class ChatRequest(
+    val messages: List<ApiMessage>,
+    val stream: Boolean,
+    val maxTokens: Int?,
+    val temperature: Float? = null,
+    val topP: Float? = null,
+    val stop: List<String> = emptyList(),
+)
 
 /** An error with the HTTP status the client should see. */
 class ApiException(val status: Int, message: String) : Exception(message)
@@ -135,7 +146,8 @@ class ApiServer(
                 })
                 writeJson(out, 200, JSONObject().put("object", "list").put("data", data))
             }
-            request.method == "POST" && request.path == "/v1/chat/completions" -> chat(parseChat(request.body), out)
+            request.method == "POST" && request.path == "/v1/chat/completions" -> respond(parseChat(request.body), out, completion = false)
+            request.method == "POST" && request.path == "/v1/completions" -> respond(parseCompletion(request.body), out, completion = true)
             else -> throw ApiException(404, "Unknown endpoint ${request.method} ${request.path}")
         }
     }
@@ -152,33 +164,70 @@ class ApiServer(
         }
     }
 
-    private fun chat(request: ChatRequest, out: OutputStream) {
+    /** Ends generation early when a stop sequence has been found. */
+    private class StopReached : CancellationException("stop sequence")
+
+    /**
+     * Answers [request]. [completion] selects the older text-completion layout (`text`) instead of the
+     * chat layout (`message` / `delta`).
+     */
+    private fun respond(request: ChatRequest, out: OutputStream, completion: Boolean) {
         val api = backend() ?: throw ApiException(503, "PocketLM is not ready. Open the app and load a model.")
         val model = api.modelNames().firstOrNull() ?: "pocketlm"
-        val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
+        val id = (if (completion) "cmpl-" else "chatcmpl-") + UUID.randomUUID().toString().replace("-", "").take(24)
         val created = System.currentTimeMillis() / 1000
+        val filter = StopFilter(request.stop)
+        var count = 0
+
+        /** Runs the model and passes on only text that is safe to send; ends early at a stop sequence. */
+        fun generate(send: (String) -> Unit) {
+            try {
+                runBlocking {
+                    api.complete(request) { piece ->
+                        count++
+                        val safe = filter.feed(piece)
+                        if (safe.isNotEmpty()) send(safe)
+                        if (filter.finished) throw StopReached()
+                    }
+                }
+            } catch (e: StopReached) {
+                // The reply ended at a stop sequence.
+            }
+            if (!filter.finished) filter.flush().let { if (it.isNotEmpty()) send(it) }
+        }
+
+        fun finishReason() =
+            if (!filter.finished && request.maxTokens != null && count >= request.maxTokens) "length" else "stop"
 
         if (!request.stream) {
             val text = StringBuilder()
-            val count = runBlocking { api.complete(request) { text.append(it) } }
-            val finish = if (request.maxTokens != null && count >= request.maxTokens) "length" else "stop"
-            val message = JSONObject().put("role", "assistant").put("content", text.toString())
-            val choice = JSONObject().put("index", 0).put("message", message).put("finish_reason", finish)
+            generate { text.append(it) }
+            val choice = JSONObject().put("index", 0).put("finish_reason", finishReason())
+            if (completion) choice.put("text", text.toString()).put("logprobs", JSONObject.NULL)
+            else choice.put("message", JSONObject().put("role", "assistant").put("content", text.toString()))
             val usage = JSONObject().put("prompt_tokens", 0).put("completion_tokens", count).put("total_tokens", count)
             writeJson(
                 out, 200,
-                JSONObject().put("id", id).put("object", "chat.completion").put("created", created)
-                    .put("model", model).put("choices", JSONArray().put(choice)).put("usage", usage),
+                JSONObject().put("id", id).put("object", if (completion) "text_completion" else "chat.completion")
+                    .put("created", created).put("model", model).put("choices", JSONArray().put(choice)).put("usage", usage),
             )
             return
         }
 
         // Streaming: Server-Sent Events, ended by closing the connection.
         writeHead(out, 200, "OK", "text/event-stream", extra = "Cache-Control: no-cache\r\n")
-        fun chunk(delta: JSONObject, finish: String?) {
-            val choice = JSONObject().put("index", 0).put("delta", delta).put("finish_reason", finish ?: JSONObject.NULL)
-            val json = JSONObject().put("id", id).put("object", "chat.completion.chunk").put("created", created)
-                .put("model", model).put("choices", JSONArray().put(choice))
+        fun chunk(piece: String, finish: String?, first: Boolean = false) {
+            val choice = JSONObject().put("index", 0).put("finish_reason", finish ?: JSONObject.NULL)
+            if (completion) {
+                choice.put("text", piece).put("logprobs", JSONObject.NULL)
+            } else {
+                val delta = JSONObject()
+                if (first) delta.put("role", "assistant").put("content", "")
+                else if (piece.isNotEmpty()) delta.put("content", piece)
+                choice.put("delta", delta)
+            }
+            val json = JSONObject().put("id", id).put("object", if (completion) "text_completion" else "chat.completion.chunk")
+                .put("created", created).put("model", model).put("choices", JSONArray().put(choice))
             try {
                 out.write(("data: $json\n\n").toByteArray())
                 out.flush()
@@ -186,10 +235,9 @@ class ApiServer(
                 throw ClientGone()
             }
         }
-        chunk(JSONObject().put("role", "assistant").put("content", ""), null)
-        val count = runBlocking { api.complete(request) { chunk(JSONObject().put("content", it), null) } }
-        val finish = if (request.maxTokens != null && count >= request.maxTokens) "length" else "stop"
-        chunk(JSONObject(), finish)
+        if (!completion) chunk("", null, first = true)
+        generate { chunk(it, null) }
+        chunk("", finishReason())
         try {
             out.write("data: [DONE]\n\n".toByteArray())
             out.flush()
@@ -251,21 +299,51 @@ class ApiServer(
         }
     }
 
+    private fun parseJson(body: ByteArray): JSONObject = try {
+        JSONObject(body.toString(Charsets.UTF_8))
+    } catch (e: JSONException) {
+        throw ApiException(400, "The request body is not valid JSON")
+    }
+
     private fun parseChat(body: ByteArray): ChatRequest {
-        val json = try {
-            JSONObject(body.toString(Charsets.UTF_8))
-        } catch (e: JSONException) {
-            throw ApiException(400, "The request body is not valid JSON")
-        }
+        val json = parseJson(body)
         val array = json.optJSONArray("messages") ?: throw ApiException(400, "'messages' is required")
         val messages = List(array.length()) { i ->
             val m = array.optJSONObject(i) ?: throw ApiException(400, "Each message must be an object")
             ApiMessage(m.optString("role", "user"), contentText(m.opt("content")))
         }
         if (messages.none { it.role == "user" }) throw ApiException(400, "'messages' needs at least one user message")
+        return withOptions(json, messages)
+    }
+
+    /** The older `/v1/completions` shape: a `prompt` instead of `messages`. The chat template still applies. */
+    private fun parseCompletion(body: ByteArray): ChatRequest {
+        val json = parseJson(body)
+        val prompt = when (val p = json.opt("prompt")) {
+            is String -> p
+            is JSONArray -> if (p.length() > 0) p.optString(0) else ""
+            else -> ""
+        }
+        if (prompt.isBlank()) throw ApiException(400, "'prompt' is required")
+        return withOptions(json, listOf(ApiMessage("user", prompt)))
+    }
+
+    private fun withOptions(json: JSONObject, messages: List<ApiMessage>): ChatRequest {
         val maxTokens = (json.opt("max_tokens") as? Number)?.toInt()?.takeIf { it > 0 }
             ?: (json.opt("max_completion_tokens") as? Number)?.toInt()?.takeIf { it > 0 }
-        return ChatRequest(messages, json.optBoolean("stream", false), maxTokens)
+        val stop = when (val s = json.opt("stop")) {
+            is String -> listOf(s)
+            is JSONArray -> (0 until s.length()).mapNotNull { s.optString(it).ifEmpty { null } }
+            else -> emptyList()
+        }.take(MAX_STOP_SEQUENCES)
+        return ChatRequest(
+            messages = messages,
+            stream = json.optBoolean("stream", false),
+            maxTokens = maxTokens,
+            temperature = (json.opt("temperature") as? Number)?.toFloat()?.coerceIn(0f, 2f),
+            topP = (json.opt("top_p") as? Number)?.toFloat()?.coerceIn(0.01f, 1f),
+            stop = stop,
+        )
     }
 
     /** Message content is a string, or a list of parts such as {"type":"text","text":"..."}. */
@@ -316,5 +394,6 @@ class ApiServer(
         const val MAX_LINE_BYTES = 8_192
         const val MAX_HEADERS = 64
         const val MAX_CONNECTIONS = 16
+        const val MAX_STOP_SEQUENCES = 4
     }
 }

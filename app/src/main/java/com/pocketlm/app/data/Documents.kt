@@ -21,7 +21,7 @@ class DocumentStore(private val context: Context) {
         get() = File(context.filesDir, "docs").also { it.mkdirs() }
 
     /** Copies a picked text file or PDF into private storage as text. Rejects other binary files and very large ones. */
-    suspend fun import(uri: Uri): Attachment = withContext(Dispatchers.IO) {
+    suspend fun import(uri: Uri, onProgress: (String) -> Unit = {}): Attachment = withContext(Dispatchers.IO) {
         val name = context.contentResolver.query(uri, null, null, null, null)?.use { c ->
             val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (i >= 0 && c.moveToFirst()) c.getString(i) else null
@@ -32,7 +32,13 @@ class DocumentStore(private val context: Context) {
             ?: throw IOException("Cannot open the selected file")
 
         val text = if (PdfText.looksLikePdf(head)) {
-            resolver.openInputStream(uri)!!.use { PdfText.extract(context, it) }
+            try {
+                onProgress("Reading the PDF…")
+                resolver.openInputStream(uri)!!.use { PdfText.extract(context, it) }
+            } catch (e: ScannedPdfException) {
+                // No text layer: draw each page and read it with text recognition instead.
+                Ocr.readPdf(context, uri, onProgress)
+            }
         } else {
             val bytes = resolver.openInputStream(uri)?.use { it.readUpTo(MAX_BYTES + 1) }
                 ?: throw IOException("Cannot open the selected file")
@@ -43,6 +49,13 @@ class DocumentStore(private val context: Context) {
         val id = UUID.randomUUID().toString()
         File(dir, "$id.txt").writeText(text)
         Attachment(id, File(name).name, text.length)
+    }
+
+    /** Saves [text] (for example text read from a photo) as an attachment called [name]. */
+    suspend fun saveText(name: String, text: String): Attachment = withContext(Dispatchers.IO) {
+        val id = UUID.randomUUID().toString()
+        File(dir, "$id.txt").writeText(text.take(MAX_BYTES))
+        Attachment(id, name, text.length)
     }
 
     suspend fun read(id: String): String? = withContext(Dispatchers.IO) {

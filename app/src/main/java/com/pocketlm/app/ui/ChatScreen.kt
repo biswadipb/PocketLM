@@ -15,6 +15,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import com.pocketlm.app.data.ModelCatalog
 import com.pocketlm.app.data.SavedPrompt
 import androidx.compose.material.icons.filled.Edit
@@ -101,6 +102,8 @@ fun ChatScreen(
     val inputFocus = remember { FocusRequester() }
     val speakingId by vm.speakingId.collectAsStateWithLifecycle()
     val deviceStatus by vm.deviceStatus.collectAsStateWithLifecycle()
+    val sleeping by vm.sleeping.collectAsStateWithLifecycle()
+    val attachStatus by vm.attachStatus.collectAsStateWithLifecycle()
     val presets by vm.presets.collectAsStateWithLifecycle()
     val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
@@ -204,6 +207,22 @@ fun ChatScreen(
             },
         )
 
+        attachStatus?.let { status ->
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+            }
+        }
+        if (sleeping) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "The model was unloaded to free memory. It loads again when you send a message.",
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+        }
         deviceStatus.warning?.let { warning ->
             Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Text(

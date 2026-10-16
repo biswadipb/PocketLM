@@ -18,6 +18,7 @@ import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.Attachment
+import com.pocketlm.app.data.BackupManager
 import com.pocketlm.app.data.ApiBackend
 import com.pocketlm.app.data.ApiException
 import com.pocketlm.app.data.BenchResult
@@ -33,6 +34,7 @@ import com.pocketlm.app.data.HubSource
 import com.pocketlm.app.data.HfFile
 import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
+import com.pocketlm.app.data.SettingsBackup
 import com.pocketlm.app.data.StopWords
 import com.pocketlm.app.data.ToolId
 import com.pocketlm.app.data.Tools
@@ -40,6 +42,7 @@ import com.pocketlm.app.data.StorageManager
 import com.pocketlm.app.data.StorageReport
 import com.pocketlm.app.data.StoredMessage
 import com.pocketlm.app.data.LocalModel
+import com.pocketlm.app.data.IdlePolicy
 import com.pocketlm.app.data.ImageStore
 import com.pocketlm.app.data.JsonGrammar
 import com.pocketlm.app.data.ModelCatalog
@@ -47,6 +50,7 @@ import com.pocketlm.app.data.ModelHub
 import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
+import com.pocketlm.app.data.Ocr
 import com.pocketlm.app.data.Presets
 import com.pocketlm.app.data.PromptLibrary
 import com.pocketlm.app.data.SavedPrompt
@@ -55,6 +59,7 @@ import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -66,6 +71,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.IOException
 import java.security.SecureRandom
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -315,6 +322,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _benchmarking.value = true
             try {
+                if (!wakeIfAsleep()) return@launch
                 val raw = engine.bench(pp = 128, tg = 64, pl = 1, nr = 2)
                 val (prompt, generation) = BenchResult.parseSpeeds(raw)
                 if (prompt == null && generation == null) {
@@ -513,7 +521,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (!apiMutex.tryLock()) throw ApiException(503, "Another API request is running. Try again in a moment.")
         _apiBusy.value = true
+        touch()
+        val chatSampling = _generationParams.value
+        var changedSampling = false
         try {
+            if (!wakeIfAsleep()) throw ApiException(503, "The model could not be loaded again.")
             val system = request.messages.firstOrNull { it.role == "system" }?.content?.takeIf { it.isNotBlank() } ?: selectedPrompt
             val turns = request.messages.filter { it.role != "system" }
             val lastUser = turns.indexOfLast { it.role == "user" }
@@ -525,6 +537,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
             if (_jsonMode.value) engine.setOutputGrammar("")
             engine.resetConversation(system)
+            if (request.temperature != null || request.topP != null) {
+                engine.updateSampling(request.temperature ?: chatSampling.temperature, request.topP ?: chatSampling.topP)
+                changedSampling = true
+            }
             var count = 0
             engine.sendUserPrompt(prompt, request.maxTokens ?: InferenceEngine.DEFAULT_PREDICT_LENGTH).collect {
                 count++
@@ -535,15 +551,162 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             withContext(NonCancellable) {
                 try {
                     awaitModelReady()
+                    if (changedSampling) engine.updateSampling(chatSampling.temperature, chatSampling.topP)
                     engine.resetConversation(chatSystemPrompt)
                     if (_jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
                     pendingContext = replayText(_messages.value.map { it.isUser to it.text })
                 } catch (e: Exception) {
                     _error.value = "Could not restore the chat after an API request: ${e.message}"
                 }
+                touch()
                 _apiBusy.value = false
                 apiMutex.unlock()
             }
+        }
+    }
+
+    // ---- Backup and restore ------------------------------------------------------------
+
+    /** The settings that travel in a backup. Secrets (API key, app lock) and per-phone choices are left out. */
+    private val backupKeys = setOf(
+        KEY_THEME, KEY_CTX, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
+        KEY_STOP, KEY_PRESETS, KEY_PRESET_ID, KEY_PROMPTS, KEY_TOOLS, KEY_BG_REPLIES, KEY_READ_ALOUD, KEY_IDLE_MINUTES,
+    )
+
+    private fun backupManager(): BackupManager {
+        val files = getApplication<Application>().filesDir
+        return BackupManager(File(files, "chats"), File(files, "images"), File(files, "docs"))
+    }
+
+    fun exportBackup(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val chats = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                        backupManager().export(out, SettingsBackup.toJson(prefs.all, backupKeys), System.currentTimeMillis())
+                    } ?: throw IOException("Cannot write to that location")
+                }
+                _error.value = "Backed up $chats chats and your settings"
+            } catch (e: Exception) {
+                _error.value = "Backup failed: ${e.message ?: e::class.simpleName}"
+            }
+        }
+    }
+
+    fun importBackup(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { backupManager().restore(it) }
+                        ?: throw IOException("Cannot open that file")
+                }
+                var settingsApplied = 0
+                result.settings?.let { json ->
+                    val editor = prefs.edit()
+                    settingsApplied = SettingsBackup.apply(json, backupKeys) { key, value ->
+                        when (value) {
+                            is String -> editor.putString(key, value)
+                            is Int -> editor.putInt(key, value)
+                            is Float -> editor.putFloat(key, value)
+                            is Boolean -> editor.putBoolean(key, value)
+                        }
+                    }
+                    editor.apply()
+                    reloadSettings()
+                }
+                refreshChats()
+                _error.value = buildString {
+                    append("Restored ${result.chatsRestored} chats")
+                    if (result.chatsKept > 0) append(" (${result.chatsKept} were already up to date)")
+                    if (settingsApplied > 0) append(" and your settings")
+                }
+            } catch (e: Exception) {
+                _error.value = "Restore failed: ${e.message ?: e::class.simpleName}"
+            }
+        }
+    }
+
+    /** Reads every backed-up setting from preferences again, after a restore changed them. */
+    private fun reloadSettings() {
+        _themeMode.value = ThemeMode.entries.firstOrNull { it.name == prefs.getString(KEY_THEME, null) } ?: ThemeMode.System
+        _generationParams.value = GenerationParams(
+            contextSize = prefs.getInt(KEY_CTX, DEFAULT_PARAMS.contextSize),
+            threads = prefs.getInt(KEY_THREADS, DEFAULT_PARAMS.threads),
+            temperature = prefs.getFloat(KEY_TEMP, DEFAULT_PARAMS.temperature),
+            topP = prefs.getFloat(KEY_TOP_P, DEFAULT_PARAMS.topP),
+            topK = prefs.getInt(KEY_TOP_K, DEFAULT_PARAMS.topK),
+            minP = prefs.getFloat(KEY_MIN_P, DEFAULT_PARAMS.minP),
+            repeatPenalty = prefs.getFloat(KEY_REPEAT, DEFAULT_PARAMS.repeatPenalty),
+            seed = prefs.getInt(KEY_SEED, DEFAULT_PARAMS.seed),
+        )
+        _stopWords.value = prefs.getString(KEY_STOP, "") ?: ""
+        _customPresets.value = Presets.fromJson(prefs.getString(KEY_PRESETS, null))
+        _selectedPresetId.value = prefs.getString(KEY_PRESET_ID, null) ?: Presets.DEFAULT_ID
+        _customPrompts.value = PromptLibrary.fromJson(prefs.getString(KEY_PROMPTS, null))
+        _enabledTools.value = Tools.parseEnabled(prefs.getString(KEY_TOOLS, null))
+        _backgroundReplies.value = prefs.getBoolean(KEY_BG_REPLIES, true)
+        _readAloud.value = prefs.getBoolean(KEY_READ_ALOUD, false)
+        _idleMinutes.value = prefs.getInt(KEY_IDLE_MINUTES, 0)
+    }
+
+    // ---- Freeing memory when idle ----------------------------------------------------
+
+    private val _idleMinutes = MutableStateFlow(prefs.getInt(KEY_IDLE_MINUTES, 0))
+
+    /** Minutes of inactivity after which the loaded model is unloaded to free memory; 0 means never. */
+    val idleMinutes = _idleMinutes.asStateFlow()
+
+    fun setIdleMinutes(minutes: Int) {
+        _idleMinutes.value = minutes
+        prefs.edit().putInt(KEY_IDLE_MINUTES, minutes).apply()
+        touch()
+    }
+
+    private val _sleeping = MutableStateFlow(false)
+
+    /** True while the model is unloaded to save memory. The next message wakes it. */
+    val sleeping = _sleeping.asStateFlow()
+
+    private var lastActive = SystemClock.elapsedRealtime()
+
+    private fun touch() {
+        lastActive = SystemClock.elapsedRealtime()
+    }
+
+    private fun anythingRunning() =
+        _generating.value || _loading.value || _benchmarking.value || _comparing.value || _apiBusy.value
+
+    private fun sleepIfIdle() {
+        val idle = IdlePolicy.shouldSleep(
+            nowMs = SystemClock.elapsedRealtime(),
+            lastActiveMs = lastActive,
+            timeoutMs = _idleMinutes.value * 60_000L,
+            busy = anythingRunning(),
+            hasModel = _loadedModel.value != null,
+            asleep = _sleeping.value,
+        )
+        if (!idle) return
+        runCatching { engine.cleanUp() }
+        _sleeping.value = true
+    }
+
+    /** Reloads the model if it was put to sleep. Returns false (and reports why) if that fails. */
+    private suspend fun wakeIfAsleep(): Boolean {
+        if (!_sleeping.value) return true
+        val model = _loadedModel.value ?: run { _sleeping.value = false; return false }
+        _loading.value = true
+        return try {
+            loadIntoEngine(model)
+            pendingContext = replayText(_messages.value.map { it.isUser to it.text })
+            touch()
+            true
+        } catch (e: Exception) {
+            _loadedModel.value = null
+            _error.value = "Could not wake ${model.fileName}: ${e.message ?: e::class.simpleName}"
+            false
+        } finally {
+            _sleeping.value = false
+            _loading.value = false
         }
     }
 
@@ -693,7 +856,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setJsonMode(on: Boolean) {
         _jsonMode.value = on
-        if (_loadedModel.value == null || _generating.value || _loading.value) return
+        if (_loadedModel.value == null || _sleeping.value || _generating.value || _loading.value) return
         viewModelScope.launch {
             try {
                 engine.setOutputGrammar(if (on) JsonGrammar.gbnf else "")
@@ -990,6 +1153,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         engine.loadModel(model.path, _generationParams.value)
         engine.setSystemPrompt(chatSystemPrompt)
         _loadedModel.value = model
+        _sleeping.value = false
+        touch()
 
         _visionReady.value = false
         val projector = _projectorChoice.value[model.fileName]?.let { name ->
@@ -1005,6 +1170,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun unload() {
+        _sleeping.value = false
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         _loadedModel.value = null
@@ -1026,7 +1192,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
         _pendingImage.value = null
         _messages.update { it + ChatMessage(prompt, true, imagePath = image) }
-        startGeneration(prompt, image)
+        touch()
+        if (_sleeping.value) {
+            viewModelScope.launch { if (wakeIfAsleep()) startGeneration(prompt, image) }
+        } else {
+            startGeneration(prompt, image)
+        }
     }
 
     /** Re-asks the last user message. The engine can't undo a reply, so its context is rebuilt first. */
@@ -1150,6 +1321,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "Generation failed: ${e.message ?: e::class.simpleName}"
             } finally {
                 _generating.value = false
+                touch()
                 ReplyService.stop(getApplication())
                 if (count == 0) {
                     // Nothing was written (an error, or stopped before the first word): drop the empty bubble.
@@ -1184,19 +1356,36 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     val attachments = _attachments.asStateFlow()
     private var docIndex: Bm25Index? = null
 
+    private val _attachStatus = MutableStateFlow<String?>(null)
+
+    /** A short progress line while a file is being read (a PDF, or text recognised from pages), or null. */
+    val attachStatus = _attachStatus.asStateFlow()
+
     fun attach(uri: Uri) {
-        if (getApplication<Application>().contentResolver.getType(uri)?.startsWith("image/") == true) {
+        if (_attachStatus.value != null) return
+        val isImage = getApplication<Application>().contentResolver.getType(uri)?.startsWith("image/") == true
+        // A model that can see sends the photo itself; otherwise its text is read and attached as a document.
+        if (isImage && _visionReady.value) {
             attachImage(uri)
             return
         }
         viewModelScope.launch {
+            _attachStatus.value = if (isImage) "Reading text in the photo…" else "Reading the file…"
             try {
-                val doc = docStore.import(uri)
+                val doc = if (isImage) {
+                    val text = Ocr.recognize(getApplication(), uri).trim()
+                    if (text.isEmpty()) throw IOException("No text was found in that photo, and the loaded model can't see images.")
+                    docStore.saveText("Photo text.txt", text)
+                } else {
+                    docStore.import(uri) { _attachStatus.value = it }
+                }
                 _attachments.update { it + doc }
                 rebuildDocIndex()
                 if (_messages.value.isNotEmpty()) saveCurrentChat()
             } catch (e: Exception) {
                 _error.value = e.message ?: "Could not attach the file"
+            } finally {
+                _attachStatus.value = null
             }
         }
     }
@@ -1375,6 +1564,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        viewModelScope.launch {
+            while (true) {
+                delay(IDLE_CHECK_MS)
+                sleepIfIdle()
+            }
+        }
         ApiGateway.backend = apiBackend
         if (_apiEnabled.value) ApiService.start(getApplication())
         startDeviceMonitoring()
@@ -1420,9 +1615,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_API_ENABLED = "api_enabled"
         const val KEY_BG_REPLIES = "background_replies"
         const val KEY_TOOLS = "enabled_tools"
+        const val KEY_IDLE_MINUTES = "idle_minutes"
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20
+        const val IDLE_CHECK_MS = 30_000L
         const val MAX_INCOMING_CHARS = 8000
         val DEFAULT_PARAMS = GenerationParams()
         const val MAX_REPLAY_CHARS = 4000
