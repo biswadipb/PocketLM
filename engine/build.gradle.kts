@@ -11,9 +11,6 @@ android {
         minSdk = 30
         consumerProguardFiles("consumer-rules.pro")
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
         externalNativeBuild {
             cmake {
                 arguments += "-DCMAKE_BUILD_TYPE=Release"
@@ -25,7 +22,18 @@ android {
                 arguments += "-DGGML_BACKEND_DL=ON"
                 arguments += "-DGGML_CPU_ALL_VARIANTS=ON"
                 arguments += "-DGGML_LLAMAFILE=OFF"
+                // Build libraries that also work on phones with 16 KB memory pages (required for newer Android).
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
+        }
+    }
+    buildTypes {
+        // Debug builds also include x86_64 so they run on the emulator; release builds are for real phones.
+        debug {
+            ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        }
+        release {
+            ndk { abiFilters += listOf("arm64-v8a") }
         }
     }
     externalNativeBuild {

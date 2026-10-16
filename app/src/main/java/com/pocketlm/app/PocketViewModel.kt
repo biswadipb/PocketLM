@@ -34,6 +34,8 @@ import com.pocketlm.app.data.HfFile
 import com.pocketlm.app.data.HfModel
 import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.StopWords
+import com.pocketlm.app.data.ToolId
+import com.pocketlm.app.data.Tools
 import com.pocketlm.app.data.StorageManager
 import com.pocketlm.app.data.StorageReport
 import com.pocketlm.app.data.StoredMessage
@@ -533,7 +535,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             withContext(NonCancellable) {
                 try {
                     awaitModelReady()
-                    engine.resetConversation(selectedPrompt)
+                    engine.resetConversation(chatSystemPrompt)
                     if (_jsonMode.value) engine.setOutputGrammar(JsonGrammar.gbnf)
                     pendingContext = replayText(_messages.value.map { it.isUser to it.text })
                 } catch (e: Exception) {
@@ -543,6 +545,37 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 apiMutex.unlock()
             }
         }
+    }
+
+    // ---- Tools the model may use -------------------------------------------------------
+
+    private val _enabledTools = MutableStateFlow(Tools.parseEnabled(prefs.getString(KEY_TOOLS, null)))
+
+    /** Tools the model is told about. Takes effect the next time a model loads or a new chat starts. */
+    val enabledTools = _enabledTools.asStateFlow()
+
+    fun setToolEnabled(tool: ToolId, on: Boolean) {
+        _enabledTools.update { if (on) it + tool else it - tool }
+        prefs.edit().putString(KEY_TOOLS, Tools.serialise(_enabledTools.value)).apply()
+    }
+
+    // ---- Background replies ---------------------------------------------------------
+
+    private val _backgroundReplies = MutableStateFlow(prefs.getBoolean(KEY_BG_REPLIES, true))
+
+    /** Keep replies going when the app is not on screen, and notify when one is ready. */
+    val backgroundReplies = _backgroundReplies.asStateFlow()
+
+    fun setBackgroundReplies(on: Boolean) {
+        _backgroundReplies.value = on
+        prefs.edit().putBoolean(KEY_BG_REPLIES, on).apply()
+    }
+
+    private var appVisible = true
+
+    /** Called by the activity as it comes to the front and leaves it. */
+    fun setAppVisible(visible: Boolean) {
+        appVisible = visible
     }
 
     // ---- Read aloud --------------------------------------------------------------
@@ -643,6 +676,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val selectedPrompt: String
         get() = presets.value.firstOrNull { it.id == (_chatPresetId.value ?: _selectedPresetId.value) }?.prompt
             ?: Presets.builtIn.first().prompt
+
+    /** The preset's prompt plus, when tools are on, how to ask for them. */
+    private val chatSystemPrompt: String
+        get() = Tools.withInstructions(selectedPrompt, _enabledTools.value)
 
     fun setChatPreset(id: String?) {
         _chatPresetId.value = id
@@ -951,7 +988,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         awaitIdleEngine()
         engine.loadModel(model.path, _generationParams.value)
-        engine.setSystemPrompt(selectedPrompt)
+        engine.setSystemPrompt(chatSystemPrompt)
         _loadedModel.value = model
 
         _visionReady.value = false
@@ -1050,38 +1087,70 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
         _messages.update { it + ChatMessage("", false) }
         _generating.value = true
-        val stops = StopWords.parse(_stopWords.value)
+        if (_backgroundReplies.value) {
+            ReplyGateway.stopRequested = ::stopGeneration
+            ReplyService.start(getApplication())
+        }
+        val tools = _enabledTools.value
+        // With tools on, the end of a tool request also ends the round so the app can run it.
+        val stops = StopWords.parse(_stopWords.value) + if (tools.isEmpty()) emptyList() else listOf(Tools.CLOSE_TAG)
         generationJob = viewModelScope.launch {
             val start = SystemClock.elapsedRealtime()
             var firstAt = 0L
             var count = 0
-            try {
-                val reply = if (imagePath != null && _visionReady.value) {
-                    engine.sendUserPromptWithImage(enginePrompt, imagePath)
+
+            /** Streams one model turn into the reply bubble after [base]; returns what the model wrote. */
+            suspend fun streamRound(prompt: String, image: String?, base: String): String {
+                var written = ""
+                val reply = if (image != null && _visionReady.value) {
+                    engine.sendUserPromptWithImage(prompt, image)
                 } else {
-                    engine.sendUserPrompt(enginePrompt)
+                    engine.sendUserPrompt(prompt)
                 }
-                reply.collect { token ->
-                    if (count == 0) firstAt = SystemClock.elapsedRealtime()
-                    count++
-                    var hitStopWord = false
-                    _messages.update { list ->
-                        val text = list.last().text + token
-                        val cut = StopWords.cutIndex(text, stops)
-                        hitStopWord = cut >= 0
-                        val shown = if (cut >= 0) text.substring(0, cut).trimEnd() else text
-                        list.dropLast(1) + list.last().copy(text = shown)
+                try {
+                    reply.collect { token ->
+                        if (count == 0) firstAt = SystemClock.elapsedRealtime()
+                        count++
+                        written += token
+                        val cut = StopWords.cutIndex(written, stops)
+                        if (cut >= 0) written = written.substring(0, cut).trimEnd()
+                        // Hide a tool request while it is being typed; it is replaced by a short note afterwards.
+                        val shown = base + written.substringBefore(Tools.OPEN_TAG)
+                        _messages.update { list -> list.dropLast(1) + list.last().copy(text = shown) }
+                        if (cut >= 0) throw StopWordHit()
                     }
-                    if (hitStopWord) throw StopWordHit()
+                } catch (e: StopWordHit) {
+                    // A stop word ended this turn: that is a normal finish.
                 }
-            } catch (e: StopWordHit) {
-                // A stop word ended the reply: that is a normal finish.
+                return written
+            }
+
+            try {
+                var prompt = enginePrompt
+                var image = imagePath
+                var base = ""
+                var toolRounds = 0
+                while (true) {
+                    val written = streamRound(prompt, image, base)
+                    val call = if (tools.isEmpty()) null else Tools.parseCall(written)
+                    if (call == null || toolRounds >= Tools.MAX_ROUNDS) break
+
+                    val outcome = Tools.run(call, tools)
+                    val before = written.substringBefore(Tools.OPEN_TAG).trim()
+                    base = listOf(base.trimEnd(), before, Tools.statusLine(call, outcome))
+                        .filter { it.isNotEmpty() }.joinToString("\n\n") + "\n\n"
+                    _messages.update { list -> list.dropLast(1) + list.last().copy(text = base) }
+                    prompt = Tools.followUp(call, outcome)
+                    image = null
+                    toolRounds++
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _error.value = "Generation failed: ${e.message ?: e::class.simpleName}"
             } finally {
                 _generating.value = false
+                ReplyService.stop(getApplication())
                 if (count == 0) {
                     // Nothing was written (an error, or stopped before the first word): drop the empty bubble.
                     _messages.update { list ->
@@ -1099,6 +1168,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     if (_readAloud.value) _messages.value.lastOrNull()?.let(::speak)
                 }
                 saveCurrentChat()
+                if (count > 0 && !appVisible && _backgroundReplies.value) {
+                    val chatTitle = _chats.value.firstOrNull { it.id == currentChatId }?.title
+                        ?: _messages.value.firstOrNull { it.isUser }?.text?.lineSequence()?.first()?.take(48).orEmpty()
+                    ReplyNotifier.replyReady(getApplication(), chatTitle, _messages.value.lastOrNull()?.text.orEmpty())
+                }
             }
         }
     }
@@ -1315,6 +1389,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        ReplyGateway.stopRequested = null
+        ReplyService.stop(getApplication())
         if (ApiGateway.backend === apiBackend) ApiGateway.backend = null
         stopDeviceMonitoring()
         speaker?.let { runCatching { it.shutdown() } }
@@ -1342,6 +1418,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_LOCK = "app_lock"
         const val KEY_READ_ALOUD = "read_aloud"
         const val KEY_API_ENABLED = "api_enabled"
+        const val KEY_BG_REPLIES = "background_replies"
+        const val KEY_TOOLS = "enabled_tools"
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20

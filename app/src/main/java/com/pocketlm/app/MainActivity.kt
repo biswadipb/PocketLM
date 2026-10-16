@@ -56,6 +56,12 @@ class MainActivity : FragmentActivity() {
                 vm.downloads.collect { if (it.isNotEmpty()) askForNotificationsOnce() }
             }
         }
+        // Replies running in the background also need the notification permission.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                vm.generating.collect { if (it && vm.backgroundReplies.value) askForNotificationsOnce() }
+            }
+        }
 
         setContent {
             val mode by vm.themeMode.collectAsStateWithLifecycle()
@@ -80,11 +86,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStop() {
         super.onStop()
+        vm.setAppVisible(false)
         stoppedAt = SystemClock.elapsedRealtime()
     }
 
     override fun onStart() {
         super.onStart()
+        vm.setAppVisible(true)
         if (stoppedAt > 0 && SystemClock.elapsedRealtime() - stoppedAt > LOCK_AFTER_MS) vm.lockIfEnabled()
     }
 

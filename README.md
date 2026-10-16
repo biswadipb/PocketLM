@@ -30,10 +30,12 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 **Conversations**
 - Chats are saved automatically; reopen, rename, pin, search and delete them from History
 - Share a chat as text, or save it as a Markdown file
+- Long replies keep going in the background (even with the screen off), with a Stop button in a small notification, and you get a notification when one is ready
 - Reopening a chat reloads its model and replays the recent conversation with your next message
 
 **Documents**
-- Attach text files (txt, md, csv, json, code) to a chat and ask questions about them
+- Attach text files (txt, md, csv, json, code) or PDFs to a chat and ask questions about them
+- PDFs are read as text; scanned pages (images of text) are not supported
 - Relevant excerpts are found with BM25 keyword search, so no embedding model is needed
 - Attachments are saved with the chat
 
@@ -55,6 +57,7 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 
 **Settings**
 - Light, dark, or follow-system theme
+- Model tools: let the model use a calculator, the date and time, or a Wikipedia lookup while it answers (off by default; the model asks with a short tag, the app runs the tool and hands back the result)
 - Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts)
 - Stop words: end a reply as soon as one appears (applies immediately)
 - System prompt presets: four built in, plus your own
@@ -64,7 +67,8 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 
 ## Known limits
 
-- PDFs are not supported as attachments, only plain text files
+- PDF text extraction is untested on a device; scanned PDFs have no text to read
+- Tool use depends on the model following a text format, which small models do inconsistently
 - One image per message, shrunk to 1024 px on the long side; earlier images are not re-shown to the model after a chat is reopened or a reply is regenerated
 - Document search matches keywords, not meaning, so a question worded differently from the document may miss
 - Long document chats fill the context faster; raise the context length in Settings if needed
@@ -91,7 +95,15 @@ cd PocketLM
 
 If you already cloned without submodules: `git submodule update --init --depth 1`.
 
-The first build compiles llama.cpp for `arm64-v8a` and `x86_64`, so it takes a few minutes. The debug APK is large (hundreds of MB) because the native libraries are not stripped.
+The first build compiles llama.cpp, so it takes a few minutes. Debug builds include `arm64-v8a` and `x86_64` (for the emulator).
+
+For a release build, which is for real phones (`arm64-v8a` only, stripped, minified, about 33 MB):
+
+```bash
+./gradlew :app:assembleRelease
+```
+
+The result is unsigned; sign it with your own keystore before installing it or publishing it. The native libraries are built for 16 KB memory pages, which newer Android versions require.
 
 Run the unit tests with `./gradlew :app:testDebugUnitTest`.
 
@@ -102,10 +114,9 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 ## Roadmap
 
 - Run on a device and fix what breaks
-- Tool use (calculator, web search) and API features such as temperature per request
-- Semantic document search with an embedding model, and PDF support
+- More tools (web search), and API features such as temperature per request
+- Semantic document search with an embedding model, and reading scanned PDFs
 - GPU / NPU acceleration
-- Smaller release builds
 
 ## License
 

@@ -6,6 +6,8 @@ plugins {
 android {
     namespace = "com.pocketlm.app"
     compileSdk = 36
+    // The same NDK as the engine module, so Android Gradle can find its tools to strip the native libraries.
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.pocketlm.app"
@@ -38,6 +40,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.fragment)
+    implementation(libs.pdfbox.android)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(platform(libs.androidx.compose.bom))

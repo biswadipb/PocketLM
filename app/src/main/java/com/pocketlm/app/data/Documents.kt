@@ -20,19 +20,26 @@ class DocumentStore(private val context: Context) {
     private val dir: File
         get() = File(context.filesDir, "docs").also { it.mkdirs() }
 
-    /** Copies a picked text file into private storage. Rejects binary files and very large ones. */
+    /** Copies a picked text file or PDF into private storage as text. Rejects other binary files and very large ones. */
     suspend fun import(uri: Uri): Attachment = withContext(Dispatchers.IO) {
         val name = context.contentResolver.query(uri, null, null, null, null)?.use { c ->
             val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (i >= 0 && c.moveToFirst()) c.getString(i) else null
         } ?: "document.txt"
 
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readUpTo(MAX_BYTES + 1) }
+        val resolver = context.contentResolver
+        val head = resolver.openInputStream(uri)?.use { it.readUpTo(8) }
             ?: throw IOException("Cannot open the selected file")
-        if (bytes.size > MAX_BYTES) throw IOException("File is larger than ${MAX_BYTES / 1_000_000} MB")
-        if (looksBinary(bytes)) throw IOException("Only text files are supported (txt, md, csv, json, code)")
 
-        val text = bytes.toString(Charsets.UTF_8)
+        val text = if (PdfText.looksLikePdf(head)) {
+            resolver.openInputStream(uri)!!.use { PdfText.extract(context, it) }
+        } else {
+            val bytes = resolver.openInputStream(uri)?.use { it.readUpTo(MAX_BYTES + 1) }
+                ?: throw IOException("Cannot open the selected file")
+            if (bytes.size > MAX_BYTES) throw IOException("File is larger than ${MAX_BYTES / 1_000_000} MB")
+            if (looksBinary(bytes)) throw IOException("Only text files and PDFs are supported")
+            bytes.toString(Charsets.UTF_8)
+        }
         val id = UUID.randomUUID().toString()
         File(dir, "$id.txt").writeText(text)
         Attachment(id, File(name).name, text.length)

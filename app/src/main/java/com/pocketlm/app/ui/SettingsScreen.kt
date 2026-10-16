@@ -21,6 +21,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import com.pocketlm.app.ApiStatus
 import com.pocketlm.app.data.LocalNetwork
+import com.pocketlm.app.data.ToolId
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -68,6 +69,8 @@ fun SettingsScreen(
     val stopWords by vm.stopWords.collectAsStateWithLifecycle()
     val lockEnabled by vm.lockEnabled.collectAsStateWithLifecycle()
     val readAloud by vm.readAloud.collectAsStateWithLifecycle()
+    val backgroundReplies by vm.backgroundReplies.collectAsStateWithLifecycle()
+    val enabledTools by vm.enabledTools.collectAsStateWithLifecycle()
     val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
@@ -175,6 +178,37 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            SectionTitle("Model tools", Modifier.padding(top = 24.dp))
+            Text(
+                "Let the model use helpers while it answers. Applies the next time a model loads or you start a new chat. " +
+                    "Small models do not always use tools well, so try it and see.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ToolId.entries.forEach { tool ->
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tool.label)
+                        Text(tool.blurb, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(checked = tool in enabledTools, onCheckedChange = { vm.setToolEnabled(tool, it) })
+                }
+            }
+
+            SectionTitle("Notifications", Modifier.padding(top = 24.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Keep replies going in the background")
+                    Text(
+                        "A long reply carries on when you switch apps or the screen turns off, and you get a " +
+                            "notification when it is ready. A small notification shows while one is being written.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = backgroundReplies, onCheckedChange = vm::setBackgroundReplies)
             }
 
             SectionTitle("Voice", Modifier.padding(top = 24.dp))
