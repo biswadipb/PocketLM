@@ -554,7 +554,24 @@ static llama_pos current_position;
 static std::vector<llama_token> g_history;
 static bool                     g_history_valid = true;
 
+// A place to come back to, so the app can ask the model something in the middle of a conversation (for example for a
+// title) and then forget the question and the answer without reading the whole conversation again.
+struct Checkpoint {
+    bool      valid         = false;
+    unsigned  epoch         = 0;     // which conversation it belongs to
+    int       shifts        = 0;     // how many times the context had been shifted
+    size_t    chat_count    = 0;
+    llama_pos position      = 0;
+    size_t    history_size  = 0;
+    bool      history_valid = true;
+};
+static Checkpoint g_checkpoint;
+static unsigned   g_epoch  = 0;   // changes whenever a conversation is started over, so an old checkpoint is never used
+static int        g_shifts = 0;   // counts context shifts, which move every token and so end a checkpoint
+
 static void reset_long_term_states(const bool clear_kv_cache = true) {
+    g_epoch++;
+    g_checkpoint.valid = false;
     chat_msgs.clear();
     system_prompt_position = 0;
     current_position = 0;
@@ -575,6 +592,7 @@ static void reset_long_term_states(const bool clear_kv_cache = true) {
  */
 static void shift_context() {
     const int n_discard = (current_position - system_prompt_position) / 2;
+    g_shifts++;
     LOGi("%s: Discarding %d tokens", __func__, n_discard);
     llama_memory_seq_rm(llama_get_memory(g_context), 0, system_prompt_position, system_prompt_position + n_discard);
     llama_memory_seq_add(llama_get_memory(g_context), 0, system_prompt_position + n_discard, current_position, -n_discard);
@@ -1041,6 +1059,44 @@ static std::vector<llama_token> draft_tokens(llama_token first, int n_max) {
         if (i + 1 < n_max && !draft_decode(&guesses.back(), 1)) { break; }
     }
     return guesses;
+}
+
+/** Remembers where the conversation is now. Returns false if there is no conversation to remember. */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeMarkCheckpoint(JNIEnv * /*env*/, jobject /*unused*/) {
+    if (!g_model || !g_context) { return JNI_FALSE; }
+    g_checkpoint = {true, g_epoch, g_shifts, chat_msgs.size(), current_position, g_history.size(), g_history_valid};
+    return JNI_TRUE;
+}
+
+/**
+ * Forgets everything said since [markCheckpoint]. Returns 0 when the conversation is back as it was, 1 when there is
+ * nothing to go back to (the conversation was started over or shifted meanwhile), 2 when this model's memory cannot
+ * forget the end of a conversation (the app then rebuilds it).
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeReturnToCheckpoint(JNIEnv * /*env*/, jobject /*unused*/) {
+    const Checkpoint cp = g_checkpoint;
+    g_checkpoint.valid = false;
+    if (!cp.valid || !g_model || !g_context || cp.epoch != g_epoch || cp.shifts != g_shifts) { return 1; }
+    if (current_position < cp.position || chat_msgs.size() < cp.chat_count) { return 1; }
+
+    reset_short_term_states();
+    if (current_position > cp.position &&
+        !llama_memory_seq_rm(llama_get_memory(g_context), 0, cp.position, -1)) {
+        return 2;
+    }
+    current_position = cp.position;
+    chat_msgs.erase(chat_msgs.begin() + (long) cp.chat_count, chat_msgs.end());
+    if (cp.history_valid && g_history_valid && g_history.size() >= cp.history_size) {
+        g_history.resize(cp.history_size);
+    } else {
+        g_history_valid = false;
+    }
+    if (g_draft_ctx) { draft_forget_everything(); }
+    return 0;
 }
 
 /** Turns a token that is now part of the conversation into the text for the app; null when the reply is over. */

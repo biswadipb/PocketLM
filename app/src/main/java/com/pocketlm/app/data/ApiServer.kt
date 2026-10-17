@@ -47,6 +47,8 @@ data class ChatRequest(
     /** Functions the model may ask the caller to run (OpenAI `tools`). */
     val tools: List<ApiTool> = emptyList(),
     val toolChoice: ToolChoice = ToolChoice.Auto,
+    /** The model the caller named (`model`), if any. It selects a downloaded model only when the app allows that. */
+    val model: String? = null,
 ) {
     /** True if the model should be offered the functions and its answer read for calls to them. */
     val usesTools: Boolean get() = ApiTools.active(tools, toolChoice)
@@ -54,6 +56,9 @@ data class ChatRequest(
 
 /** An error with the HTTP status the client should see. */
 class ApiException(val status: Int, message: String) : Exception(message)
+
+/** What a speech model heard in an uploaded recording. */
+class TranscriptionResult(val text: String, val seconds: Double, val language: String? = null)
 
 /** Vectors made for the inputs of an embeddings request, one per input, in order. */
 class EmbeddingsResult(val vectors: List<FloatArray>, val model: String, val tokens: Int)
@@ -66,6 +71,16 @@ interface ApiBackend {
     /** Turns each of [inputs] into an embedding vector. Fails with an [ApiException] if there is no embedding model. */
     suspend fun embed(inputs: List<String>): EmbeddingsResult =
         throw ApiException(503, "No embedding model is selected. Choose one in PocketLM, Settings, Document search.")
+
+    /**
+     * Gets ready for [request] before any of it is answered, for example by loading the model it names. Slow work belongs
+     * here rather than in [complete], so the answer's header already names the right model.
+     */
+    suspend fun prepare(request: ChatRequest) {}
+
+    /** Writes down what is said in the recording [audio] (a WAV, MP3, M4A or similar file). */
+    suspend fun transcribe(audio: ByteArray, fileName: String?, language: String?): TranscriptionResult =
+        throw ApiException(503, "No speech model is set up. Download one in PocketLM, Settings, Dictation.")
 
     /** Writes a reply, passing each piece to [onToken]. Returns how many pieces were produced. */
     suspend fun complete(request: ChatRequest, onToken: (String) -> Unit): Int
@@ -150,7 +165,8 @@ class ApiServer(
                 val head = readHead(input)
                 // Check the key before reading the body, so an unauthenticated caller can't make us buffer it.
                 if (!isPublic(head.method, head.path)) authenticate(head.headers)
-                route(Request(head.method, head.path, head.headers, readBody(input, head.headers)), out)
+                val limit = if (head.path == TRANSCRIPTIONS) MAX_AUDIO_BODY_BYTES else MAX_BODY_BYTES
+                route(Request(head.method, head.path, head.headers, readBody(input, head.headers, limit)), out)
             } catch (e: ApiException) {
                 writeJson(out, e.status, errorJson(e.message ?: "Error", e.status))
             } catch (e: ClientGone) {
@@ -181,6 +197,7 @@ class ApiServer(
                 writeJson(out, 200, JSONObject().put("object", "list").put("data", data))
             }
             request.method == "POST" && request.path == "/v1/embeddings" -> embeddings(request.body, out)
+            request.method == "POST" && request.path == TRANSCRIPTIONS -> transcription(request, out)
             request.method == "POST" && request.path == "/v1/chat/completions" -> respond(parseChat(request.body), out, completion = false)
             request.method == "POST" && request.path == "/v1/completions" -> respond(parseCompletion(request.body), out, completion = true)
             else -> throw ApiException(404, "Unknown endpoint ${request.method} ${request.path}")
@@ -208,6 +225,7 @@ class ApiServer(
      */
     private fun respond(request: ChatRequest, out: OutputStream, completion: Boolean) {
         val api = backend() ?: throw ApiException(503, "PocketLM is not ready. Open the app and load a model.")
+        runBlocking { api.prepare(request) }
         val model = api.modelNames().firstOrNull() ?: "pocketlm"
         val id = (if (completion) "cmpl-" else "chatcmpl-") + UUID.randomUUID().toString().replace("-", "").take(24)
         val created = System.currentTimeMillis() / 1000
@@ -359,12 +377,12 @@ class ApiServer(
         return Head(method, path, headers)
     }
 
-    private fun readBody(input: InputStream, headers: Map<String, String>): ByteArray {
+    private fun readBody(input: InputStream, headers: Map<String, String>, limit: Int): ByteArray {
         if (headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true) {
             throw ApiException(411, "Send the body with a Content-Length instead of chunked encoding")
         }
         val length = headers["content-length"]?.toIntOrNull() ?: 0
-        if (length < 0 || length > MAX_BODY_BYTES) throw ApiException(413, "Request body is too large")
+        if (length < 0 || length > limit) throw ApiException(413, "Request body is too large")
         val body = ByteArray(length)
         var read = 0
         while (read < length) {
@@ -383,6 +401,37 @@ class ApiServer(
             if (b == '\n'.code) return buffer.toString(Charsets.ISO_8859_1.name()).trimEnd('\r')
             buffer.write(b)
             if (buffer.size() > MAX_LINE_BYTES) throw ApiException(431, "Header line too long")
+        }
+    }
+
+    /**
+     * `POST /v1/audio/transcriptions`: a recording in, the words out, in the layout OpenAI's libraries expect. The file may be
+     * any format the phone can play. `language`, `prompt` and `temperature` are accepted and not needed.
+     */
+    private fun transcription(request: Request, out: OutputStream) {
+        val parts = try {
+            Multipart.parse(request.headers["content-type"], request.body)
+        } catch (e: IllegalArgumentException) {
+            throw ApiException(400, e.message ?: "The request is not multipart/form-data.")
+        }
+        val file = parts.firstOrNull { it.name == "file" && it.data.isNotEmpty() }
+            ?: throw ApiException(400, "'file' is required: upload the recording as a form field called file")
+        fun field(name: String) = parts.firstOrNull { it.name == name && it.fileName == null }?.text?.trim()?.ifEmpty { null }
+        val format = field("response_format") ?: "json"
+        if (format !in setOf("json", "text", "verbose_json")) {
+            throw ApiException(400, "'response_format' must be json, text or verbose_json")
+        }
+        val api = backend() ?: throw ApiException(503, "PocketLM is not ready. Open the app first.")
+        val language = field("language")
+        val heard = runBlocking { api.transcribe(file.data, file.fileName, language) }
+        when (format) {
+            "text" -> writeRaw(out, 200, "OK", "text/plain; charset=utf-8", (heard.text + "\n").toByteArray())
+            "verbose_json" -> writeJson(
+                out, 200,
+                JSONObject().put("task", "transcribe").put("language", heard.language ?: language ?: "unknown")
+                    .put("duration", heard.seconds).put("text", heard.text).put("segments", JSONArray()),
+            )
+            else -> writeJson(out, 200, JSONObject().put("text", heard.text))
         }
     }
 
@@ -480,6 +529,7 @@ class ApiServer(
             stop = stop,
             jsonSchema = schema,
             jsonObject = schema == null && JsonSchema.wantsJsonObject(format),
+            model = json.optString("model", "").ifEmpty { null },
         )
     }
 
@@ -528,6 +578,10 @@ class ApiServer(
     private companion object {
         const val READ_TIMEOUT_MS = 30_000
         const val MAX_BODY_BYTES = 4_000_000
+
+        /** OpenAI's own limit for an uploaded recording. */
+        const val MAX_AUDIO_BODY_BYTES = 26_000_000
+        const val TRANSCRIPTIONS = "/v1/audio/transcriptions"
         const val MAX_LINE_BYTES = 8_192
         const val MAX_HEADERS = 64
         const val MAX_CONNECTIONS = 16

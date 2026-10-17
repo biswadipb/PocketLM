@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -223,6 +225,9 @@ fun ModelsScreen(
                 }
             }
 
+            item { SectionTitle("From the Ollama library") }
+            item { OllamaSection(vm) }
+
             item { SectionTitle("From a link") }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -245,7 +250,7 @@ fun ModelsScreen(
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+    Text(text, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
 }
 
 @Composable

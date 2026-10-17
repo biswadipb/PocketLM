@@ -54,6 +54,8 @@ dependencies {
     implementation(libs.mlkit.text.japanese)
     implementation(libs.mlkit.text.korean)
     implementation(libs.play.services.base)
+    // Older ZIM files (Kiwix's offline Wikipedia) compress with xz; newer ones use Zstandard, which is read by data/Zstd.kt.
+    implementation(libs.xz)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(platform(libs.androidx.compose.bom))

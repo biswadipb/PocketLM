@@ -3,7 +3,7 @@ package com.pocketlm.app.data
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** A reusable message the user can drop into the message box. */
+/** A reusable message the user can drop into the message box. It may contain fields such as {{date}} and {{ask: tone}} (see [PromptFields]). */
 data class SavedPrompt(val id: String, val title: String, val text: String, val builtIn: Boolean = false)
 
 object PromptLibrary {
@@ -13,6 +13,8 @@ object PromptLibrary {
         SavedPrompt("grammar", "Fix grammar", "Fix the spelling and grammar in the text below. Keep the meaning and tone:\n\n", builtIn = true),
         SavedPrompt("translate", "Translate to English", "Translate the following into English:\n\n", builtIn = true),
         SavedPrompt("ideas", "Brainstorm", "Give me ten varied ideas for: ", builtIn = true),
+        SavedPrompt("reply", "Reply to the copied message", "Write a {{ask: tone = friendly}} reply to this message:\n\n{{clipboard}}", builtIn = true),
+        SavedPrompt("plan", "Plan my day", "Today is {{weekday}}, {{date}}. Help me plan my day. What I need to get done: {{ask: tasks}}", builtIn = true),
     )
 
     fun toJson(custom: List<SavedPrompt>): String =

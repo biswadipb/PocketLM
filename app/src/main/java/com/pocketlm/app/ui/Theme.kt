@@ -13,7 +13,8 @@ enum class ThemeMode(val label: String) {
     Dark("Dark"),
 }
 
-private val LightColors = lightColorScheme(
+/** The light and dark colours; internal so a test can check that text on them is readable. */
+internal val LightColors = lightColorScheme(
     primary = Color(0xFF6D28D9),
     onPrimary = Color.White,
     primaryContainer = Color(0xFFEDE4FF),
@@ -29,7 +30,7 @@ private val LightColors = lightColorScheme(
     outline = Color(0xFF7B7487),
 )
 
-private val DarkColors = darkColorScheme(
+internal val DarkColors = darkColorScheme(
     primary = Color(0xFFC4A8FF),
     onPrimary = Color(0xFF2E0A6B),
     primaryContainer = Color(0xFF4A1FA8),

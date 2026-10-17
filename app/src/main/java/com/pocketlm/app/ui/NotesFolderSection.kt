@@ -42,8 +42,9 @@ internal fun NotesFolderSection(vm: PocketViewModel) {
     SectionTitle("My notes", Modifier.padding(top = 24.dp))
     Text(
         "Choose a folder of text, Markdown, HTML or PDF files, such as an Obsidian vault or a folder in Google Drive, Dropbox or " +
-            "Nextcloud, and chats can find answers in it. PocketLM only reads the folder; what it learns is kept on this phone and " +
-            "is not synced or backed up. With a search model chosen in Document search, passages are matched by meaning as well.",
+            "Nextcloud, and chats can find answers in it. PocketLM reads the folder, and adds to it only when you save a reply or " +
+            "a chat there; what it learns is kept on this phone and is not synced or backed up. With a search model chosen in " +
+            "Document search, passages are matched by meaning as well.",
         style = MaterialTheme.typography.bodySmall,
         color = muted,
     )
@@ -66,16 +67,32 @@ internal fun NotesFolderSection(vm: PocketViewModel) {
         Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
     }
+    if (status.canSave) {
+        Text(
+            "Replies and chats you save go into a \"PocketLM\" folder inside it; nothing already there is changed.",
+            Modifier.padding(top = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = muted,
+        )
+    } else {
+        Text(
+            "PocketLM can only read this folder. To save replies and chats into it, choose the same folder again and allow editing.",
+            Modifier.padding(top = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = muted,
+        )
+        TextButton(onClick = { picker.launch(null) }) { Text("Allow saving") }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         TextButton(onClick = vm::updateNotes, enabled = status.working == null) { Text("Check for changes") }
         TextButton(onClick = { picker.launch(null) }) { Text("Choose another") }
         TextButton(onClick = vm::forgetNotesFolder) { Text("Stop using") }
     }
-    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("Search my notes in new chats")
-            Text("You can switch it for one chat in Chat options.", style = MaterialTheme.typography.bodySmall, color = muted)
-        }
-        Switch(checked = useByDefault, onCheckedChange = vm::setNotesDefault)
-    }
+    SwitchRow(
+        title = "Search my notes in new chats",
+        description = "You can switch it for one chat in Chat options.",
+        checked = useByDefault,
+        onCheckedChange = vm::setNotesDefault,
+        modifier = Modifier.padding(top = 4.dp),
+    )
 }

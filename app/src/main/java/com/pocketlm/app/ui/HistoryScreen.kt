@@ -1,5 +1,6 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.Role
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -258,7 +259,7 @@ private fun ChatRow(
     onDelete: () -> Unit,
 ) {
     Card(
-        Modifier.fillMaxWidth().clickable(onClick = onClick),
+        Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick),
         colors = if (selected) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer) else CardDefaults.cardColors(),
     ) {
         Row(Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp, end = 0.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -332,7 +333,7 @@ private fun TagsDialog(tags: List<String>, all: List<Pair<String, Int>>, onChang
                                 selected = true,
                                 onClick = { onChange(ChatTags.remove(tags, tag)) },
                                 label = { Text(tag) },
-                                trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "Remove $tag", modifier = Modifier.size(16.dp)) },
+                                trailingIcon = { Icon(Icons.Filled.Close, contentDescription = "Remove tag $tag", modifier = Modifier.size(16.dp)) },
                             )
                         }
                     }

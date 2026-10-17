@@ -51,6 +51,15 @@ object StatePolicy {
     /** All saved states together are kept under this, oldest removed first. */
     const val BUDGET_BYTES = 768L * 1024 * 1024
 
+    /** The saved state of a system prompt alone is small; one bigger than this is not kept. */
+    const val MAX_SYSTEM_STATE_BYTES = 96L * 1024 * 1024
+
+    /** How many system prompts keep a saved state at once. */
+    const val MAX_SYSTEM_STATES = 6
+
+    /** A system prompt shorter than this is read again instead: that is quicker than loading a file. */
+    const val MIN_SYSTEM_PROMPT_CHARS = 400
+
     /** Free space that must stay free after saving. */
     const val FREE_SPACE_MARGIN = 512L * 1024 * 1024
 
@@ -69,6 +78,10 @@ object StatePolicy {
         return victims
     }
 
+    /** Which of the states in [entries] (key, last written) to remove so that only the newest [keep] remain. */
+    fun surplus(entries: List<Pair<String, Long>>, keep: Int): List<String> =
+        entries.sortedByDescending { it.second }.drop(keep.coerceAtLeast(0)).map { it.first }
+
     /** The most a new state may take: the per-chat cap, and never so much that the phone runs out of space. */
     fun maxBytes(freeSpace: Long): Long = minOf(MAX_STATE_BYTES, freeSpace - FREE_SPACE_MARGIN).coerceAtLeast(0)
 }
@@ -86,6 +99,19 @@ class ChatStateCache(private val context: Context) {
     fun prefix(chatId: String): String = File(dir, fileKey(chatId)).path
 
     fun maxBytes(): Long = StatePolicy.maxBytes(dir.usableSpace)
+
+    /** The path for the saved state of a system prompt on its own, named after its [tag] so each prompt has its own. */
+    fun systemPrefix(tag: String): String = File(dir, SYSTEM_PREFIX + ChatState.hash(tag)).path
+
+    /** The most a state of a system prompt may take. */
+    fun maxSystemBytes(): Long = minOf(maxBytes(), StatePolicy.MAX_SYSTEM_STATE_BYTES)
+
+    /** Keeps only the newest few states of system prompts. */
+    suspend fun trimSystemStates() = withContext(Dispatchers.IO) {
+        val entries = dir.listFiles { f -> f.extension == "kv" && f.name.startsWith(SYSTEM_PREFIX) }.orEmpty()
+            .map { it.nameWithoutExtension to it.lastModified() }
+        StatePolicy.surplus(entries, StatePolicy.MAX_SYSTEM_STATES).forEach(::remove)
+    }
 
     suspend fun delete(chatId: String) = withContext(Dispatchers.IO) { remove(fileKey(chatId)) }
 
@@ -107,6 +133,10 @@ class ChatStateCache(private val context: Context) {
         StatePolicy.evict(entries, StatePolicy.BUDGET_BYTES, keepKey).forEach(::remove)
         // Leftovers of a save that was interrupted.
         dir.listFiles { f -> f.name.endsWith(".tmp") }?.forEach { it.delete() }
+    }
+
+    private companion object {
+        const val SYSTEM_PREFIX = "sys-"
     }
 
     private fun remove(key: String) {

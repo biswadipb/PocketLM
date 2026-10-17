@@ -70,6 +70,16 @@ class ImageStore(private val context: Context) {
         File(path).takeIf { it.parentFile == dir }?.delete()
     }
 
+    /** Makes a second copy of a saved image under a new name (for a branched chat); null if it cannot be copied. */
+    suspend fun copy(path: String): String? = withContext(Dispatchers.IO) {
+        val source = File(path).takeIf { it.isFile && it.parentFile == dir } ?: return@withContext null
+        try {
+            File(dir, "${UUID.randomUUID()}.jpg").also { source.copyTo(it) }.absolutePath
+        } catch (e: IOException) {
+            null
+        }
+    }
+
     companion object {
         const val MAX_SIDE = 1024
     }

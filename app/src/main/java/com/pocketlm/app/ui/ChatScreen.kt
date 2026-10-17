@@ -1,5 +1,14 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.verticalScroll
 import android.app.Activity
 import android.content.ActivityNotFoundException
@@ -18,7 +27,13 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import com.pocketlm.app.data.ModelCatalog
+import com.pocketlm.app.data.PromptFields
 import com.pocketlm.app.data.SavedPrompt
+import com.pocketlm.app.data.SourceRef
+import com.pocketlm.app.data.Sources
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.filled.MoreVert
+import java.time.ZonedDateTime
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.remember
@@ -69,6 +84,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -150,6 +166,9 @@ fun ChatScreen(
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val jsonMode by vm.jsonMode.collectAsStateWithLifecycle()
     val jsonSchema by vm.jsonSchema.collectAsStateWithLifecycle()
+    val grammar by vm.grammar.collectAsStateWithLifecycle()
+    var openedSource by remember { mutableStateOf<SourceRef?>(null) }
+    var fillingPrompt by remember { mutableStateOf<SavedPrompt?>(null) }
     val summarising by vm.summarising.collectAsStateWithLifecycle()
     val promptRecord by vm.promptRecord.collectAsStateWithLifecycle()
     var showOptions by remember { mutableStateOf(false) }
@@ -245,6 +264,7 @@ fun ChatScreen(
             defaultPresetId = defaultPresetId,
             jsonMode = jsonMode,
             jsonSchema = jsonSchema,
+            grammar = grammar,
             thinkingSupported = thinkingSupported,
             thinking = thinking,
             onThinking = vm::setChatThinking,
@@ -258,6 +278,11 @@ fun ChatScreen(
             onPreset = vm::setChatPreset,
             onJsonMode = vm::setJsonMode,
             onJsonSchema = vm::setJsonSchema,
+            onGrammar = vm::setGrammar,
+            onSaveToNotes = if (notesStatus.folderName == null || messages.isEmpty() || incognito) null else ({
+                showOptions = false
+                vm.saveChatToNotes()
+            }),
             canSummarise = messages.size >= 2 && loaded != null && !generating && !loading,
             onSummarise = { showOptions = false; vm.summariseChat() },
             onSuggestNotes = { showOptions = false; vm.suggestNotes() },
@@ -295,11 +320,32 @@ fun ChatScreen(
         )
     }
 
+    val clipboardManager = LocalClipboardManager.current
+    /** Puts a saved prompt in the message box with its fields filled in. */
+    fun insertPrompt(prompt: SavedPrompt, answers: Map<String, String>) {
+        // The clipboard is only read when the prompt asks for it.
+        val clip = if (PromptFields.usesClipboard(prompt.text)) clipboardManager.getText()?.text.orEmpty() else ""
+        val text = PromptFields.fill(prompt.text, answers, clip, ZonedDateTime.now())
+        input = if (input.isBlank()) text else input + "\n" + text
+    }
+    fillingPrompt?.let { prompt ->
+        FillPromptDialog(
+            asks = PromptFields.asks(prompt.text),
+            title = prompt.title,
+            onDone = { insertPrompt(prompt, it); fillingPrompt = null },
+            onDismiss = { fillingPrompt = null },
+        )
+    }
+    openedSource?.let { SourceDialog(it, onDismiss = { openedSource = null }) }
+
     if (showPrompts) {
         PromptLibraryDialog(
             prompts = prompts,
             currentText = input,
-            onInsert = { input = if (input.isBlank()) it else input + "\n" + it; showPrompts = false },
+            onInsert = { prompt ->
+                showPrompts = false
+                if (PromptFields.asks(prompt.text).isEmpty()) insertPrompt(prompt, emptyMap()) else fillingPrompt = prompt
+            },
             onSave = vm::savePrompt,
             onDelete = vm::deletePrompt,
             onDismiss = { showPrompts = false },
@@ -318,7 +364,20 @@ fun ChatScreen(
         )
     }
 
+    // A screen reader is told when a reply starts and when it is ready, without reading every word as it arrives.
+    var announcement by remember { mutableStateOf("") }
+    var sawGenerating by remember { mutableStateOf(false) }
+    LaunchedEffect(generating) {
+        if (generating) {
+            sawGenerating = true
+            announcement = "Piko is writing a reply"
+        } else if (sawGenerating) {
+            announcement = "Reply ready"
+        }
+    }
+
     Column(modifier.fillMaxSize().imePadding()) {
+        Box(Modifier.size(1.dp).semantics { liveRegion = LiveRegionMode.Polite; contentDescription = announcement })
         TopAppBar(
             title = { Text(loaded?.fileName?.removeSuffix(".gguf") ?: "PocketLM") },
             actions = {
@@ -422,6 +481,20 @@ fun ChatScreen(
             }
         }
 
+        val proposedNote by vm.proposedNote.collectAsStateWithLifecycle()
+        proposedNote?.let { fact ->
+            Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text("Piko suggests remembering:", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Text(fact, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = vm::dismissProposedNote) { Text("No thanks") }
+                        TextButton(onClick = vm::acceptProposedNote) { Text("Save") }
+                    }
+                }
+            }
+        }
+
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
                 loading -> Column(
@@ -475,6 +548,12 @@ fun ChatScreen(
                             onPage = { target -> vm.selectReply(message.id, target) },
                             highlighted = searching && currentMatch == messages.indexOf(message),
                             onStar = { vm.toggleStar(message.id) },
+                            onBranch = if (message.text.isEmpty() || message.summary || generating || loading || incognito || loaded == null ||
+                                (message.isUser && messages.indexOf(message) == 0)
+                            ) null else ({ vm.branchFrom(message.id) }),
+                            onSaveToNotes = if (message.isUser || message.summary || message.text.isEmpty() || notesStatus.folderName == null || incognito) null
+                            else ({ vm.saveReplyToNotes(message.id) }),
+                            onSource = { openedSource = it },
                         )
                     }
                 }
@@ -512,9 +591,16 @@ fun ChatScreen(
                         )
                         IconButton(
                             onClick = { vm.removePendingImage(path) },
-                            modifier = Modifier.align(Alignment.TopEnd).size(24.dp),
+                            modifier = Modifier.align(Alignment.TopEnd).size(48.dp),
                         ) {
-                            Icon(Icons.Filled.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Remove image",
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f), CircleShape)
+                                    .padding(4.dp)
+                                    .size(16.dp),
+                            )
                         }
                     }
                 }
@@ -528,16 +614,11 @@ fun ChatScreen(
                 attachments.forEach { doc ->
                     InputChip(
                         selected = false,
-                        onClick = {},
+                        onClick = { vm.removeAttachment(doc) },
                         label = { Text(doc.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp)) },
                         leadingIcon = { Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        trailingIcon = {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = "Remove ${doc.name}",
-                                modifier = Modifier.size(18.dp).clickable { vm.removeAttachment(doc) },
-                            )
-                        },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        modifier = Modifier.semantics { contentDescription = "Attached: ${doc.name}. Double tap to remove it." },
                     )
                 }
             }
@@ -610,7 +691,7 @@ fun ChatScreen(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.weight(1f).focusRequester(inputFocus),
-                placeholder = { Text(if (loaded == null) "Load a model first" else "Message") },
+                placeholder = { Text(if (loaded == null) "Load a model first" else "Message Piko") },
                 enabled = loaded != null && !generating && !loading,
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
@@ -676,8 +757,12 @@ private fun MessageBubble(
     onPage: (Int) -> Unit,
     highlighted: Boolean,
     onStar: () -> Unit,
+    onBranch: (() -> Unit)?,
+    onSaveToNotes: (() -> Unit)?,
+    onSource: (SourceRef) -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    var showMenu by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     if (message.summary) {
         SummaryCard(message.text, onCopy = { clipboard.setText(AnnotatedString(message.text)) })
@@ -687,14 +772,29 @@ private fun MessageBubble(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start,
     ) {
+        val actions = buildList {
+            if (message.text.isNotEmpty()) {
+                add(CustomAccessibilityAction("Copy message") { clipboard.setText(AnnotatedString(if (message.isUser) message.text else Thinking.answerOnly(message.text))); true })
+                add(CustomAccessibilityAction(if (speaking) "Stop reading" else "Read aloud") { onSpeak(); true })
+                add(CustomAccessibilityAction(if (message.starred) "Remove star" else "Star this message") { onStar(); true })
+            }
+            if (canEdit) add(CustomAccessibilityAction("Edit message") { onEdit(); true })
+            if (canRegenerate) add(CustomAccessibilityAction("Regenerate reply") { onRegenerate(); true })
+            if (canContinue) add(CustomAccessibilityAction("Continue reply") { onContinue(); true })
+            if (onBranch != null) add(CustomAccessibilityAction("Branch from here") { onBranch(); true })
+            if (onSaveToNotes != null) add(CustomAccessibilityAction("Save to my notes") { onSaveToNotes(); true })
+        }
         Surface(
             shape = RoundedCornerShape(18.dp),
             color = if (message.isUser) scheme.primaryContainer else scheme.surfaceVariant,
             border = if (highlighted) BorderStroke(2.dp, scheme.primary) else null,
-            modifier = Modifier.fillMaxWidth(0.85f),
+            modifier = Modifier.fillMaxWidth(0.85f).semantics {
+                contentDescription = if (message.isUser) "Your message" else "Piko's reply"
+                customActions = actions
+            },
         ) {
             if (message.text.isEmpty()) {
-                CircularProgressIndicator(Modifier.padding(14.dp), strokeWidth = 2.dp)
+                CircularProgressIndicator(Modifier.padding(14.dp).semantics { contentDescription = "Writing a reply" }, strokeWidth = 2.dp)
             } else {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     if (message.images.size > 1) {
@@ -724,6 +824,27 @@ private fun MessageBubble(
                     if (canEdit) {
                         IconButton(onClick = onEdit, modifier = Modifier.align(Alignment.End)) {
                             Icon(Icons.Filled.Edit, contentDescription = "Edit message")
+                        }
+                    }
+                    if (message.sources.isNotEmpty()) {
+                        val labels = remember(message.sources) { Sources.labels(message.sources) }
+                        Text(
+                            "Looked at",
+                            Modifier.padding(top = 8.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSurfaceVariant,
+                        )
+                        Row(
+                            Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            message.sources.forEachIndexed { i, ref ->
+                                AssistChip(
+                                    onClick = { onSource(ref) },
+                                    label = { Text(labels[i], maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp)) },
+                                    leadingIcon = { Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                )
+                            }
                         }
                     }
                     message.stats?.let {
@@ -760,6 +881,27 @@ private fun MessageBubble(
                         if (canRegenerate) {
                             IconButton(onClick = onRegenerate) {
                                 Icon(Icons.Filled.Replay, contentDescription = "Regenerate reply")
+                            }
+                        }
+                        if (onBranch != null || onSaveToNotes != null) {
+                            Box {
+                                IconButton(onClick = { showMenu = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "More actions for this message")
+                                }
+                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                                    if (onBranch != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("Branch from here") },
+                                            onClick = { showMenu = false; onBranch() },
+                                        )
+                                    }
+                                    if (onSaveToNotes != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("Save to my notes") },
+                                            onClick = { showMenu = false; onSaveToNotes() },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -813,7 +955,7 @@ private fun EditMessageDialog(initial: String, onSend: (String) -> Unit, onDismi
 private fun PromptLibraryDialog(
     prompts: List<SavedPrompt>,
     currentText: String,
-    onInsert: (String) -> Unit,
+    onInsert: (SavedPrompt) -> Unit,
     onSave: (String, String) -> Unit,
     onDelete: (SavedPrompt) -> Unit,
     onDismiss: () -> Unit,
@@ -826,7 +968,7 @@ private fun PromptLibraryDialog(
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 prompts.forEach { p ->
                     Row(
-                        Modifier.fillMaxWidth().clickable { onInsert(p.text) }.padding(vertical = 8.dp),
+                        Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Insert this prompt") { onInsert(p) }.heightIn(min = 48.dp).padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
@@ -847,6 +989,12 @@ private fun PromptLibraryDialog(
                     }
                 }
                 if (currentText.isNotBlank()) {
+                    Text(
+                        PromptFields.HELP,
+                        Modifier.padding(top = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     OutlinedTextField(
                         value = title,
                         onValueChange = { title = it },
@@ -1013,5 +1161,64 @@ private fun NoteSuggestionsDialog(suggestions: List<String>, onAdd: (List<String
             else TextButton(onClick = { onAdd(suggestions.filter { it in chosen }) }, enabled = chosen.isNotEmpty()) { Text("Add") }
         },
         dismissButton = { if (suggestions.isNotEmpty()) TextButton(onClick = onDismiss) { Text("None") } },
+    )
+}
+
+/** Asks for the answers a saved prompt needs (its {{ask: …}} fields) before it goes into the message box. */
+@Composable
+private fun FillPromptDialog(
+    asks: List<PromptFields.Ask>,
+    title: String,
+    onDone: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val answers = remember { mutableStateMapOf<String, String>().apply { asks.forEach { put(it.label, it.suggestion) } } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                asks.forEach { ask ->
+                    OutlinedTextField(
+                        value = answers[ask.label].orEmpty(),
+                        onValueChange = { answers[ask.label] = it },
+                        label = { Text(ask.label) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDone(answers.toMap()) }) { Text("Insert") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A passage the model was shown, with where it came from. */
+@Composable
+private fun SourceDialog(source: SourceRef, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(Sources.shortName(source.name), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    (if (source.fromNotes) "From your notes: " else "From an attached document: ") + source.name,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                SelectionContainer {
+                    Text(source.excerpt, Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                }
+                Text(
+                    "This is a passage the model was shown with your question. It may not have used all of it.",
+                    Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(source.excerpt)) }) { Text("Copy") } },
     )
 }

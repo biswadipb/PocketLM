@@ -86,41 +86,58 @@ object WebPage {
         return uri.toString()
     }
 
-    /** Downloads [address] and returns its readable text. Blocking: call from a background thread. */
-    fun fetch(address: String): WebText {
-        val connection = URL(address).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 20_000
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) PocketLM")
-            connection.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.1")
-            val code = connection.responseCode
-            if (code !in 200..299) throw IOException("The site answered with HTTP $code")
+    private const val MAX_REDIRECTS = 5
 
-            val type = connection.contentType.orEmpty().lowercase()
-            if ("pdf" in type) throw IOException("That link is a PDF. Download it and attach the file instead.")
-            val readable = type.isEmpty() || "html" in type || "xml" in type || type.startsWith("text/") ||
-                "json" in type
-            if (!readable) throw IOException("That link is not a web page or text (it is $type).")
-
-            val bytes = connection.inputStream.use { input ->
-                val out = ByteArrayOutputStream()
-                val buffer = ByteArray(16 * 1024)
-                while (out.size() < MAX_BYTES) {
-                    val n = input.read(buffer, 0, minOf(buffer.size, MAX_BYTES - out.size()))
-                    if (n < 0) break
-                    out.write(buffer, 0, n)
+    /**
+     * Downloads [address] and returns its readable text. Blocking: call from a background thread.
+     * With [vet], redirects are followed by hand and [vet] is called on every address first (including [address]),
+     * so a caller can refuse a redirect that leads somewhere it should not go.
+     */
+    fun fetch(address: String, vet: ((String) -> Unit)? = null): WebText {
+        var target = address
+        var hops = 0
+        while (true) {
+            vet?.invoke(target)
+            val connection = URL(target).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 20_000
+                connection.instanceFollowRedirects = vet == null
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) PocketLM")
+                connection.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.1")
+                val code = connection.responseCode
+                if (vet != null && code in 301..308 && code != 304 && code != 306) {
+                    val next = connection.getHeaderField("Location") ?: throw IOException("The site redirected without saying where")
+                    if (++hops > MAX_REDIRECTS) throw IOException("The site redirected too many times")
+                    target = URL(URL(target), next).toString()
+                    continue
                 }
-                out.toByteArray()
+                if (code !in 200..299) throw IOException("The site answered with HTTP $code")
+
+                val type = connection.contentType.orEmpty().lowercase()
+                if ("pdf" in type) throw IOException("That link is a PDF. Download it and attach the file instead.")
+                val readable = type.isEmpty() || "html" in type || "xml" in type || type.startsWith("text/") ||
+                    "json" in type
+                if (!readable) throw IOException("That link is not a web page or text (it is $type).")
+
+                val bytes = connection.inputStream.use { input ->
+                    val out = ByteArrayOutputStream()
+                    val buffer = ByteArray(16 * 1024)
+                    while (out.size() < MAX_BYTES) {
+                        val n = input.read(buffer, 0, minOf(buffer.size, MAX_BYTES - out.size()))
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                    }
+                    out.toByteArray()
+                }
+                val raw = String(bytes, charsetFor(type, bytes))
+                val isHtml = "html" in type || "xml" in type || (type.isEmpty() && raw.contains("<html", ignoreCase = true))
+                val page = if (isHtml) HtmlText.extract(raw) else WebText("", raw.trim())
+                if (page.text.length < 20) throw IOException("No readable text was found on that page.")
+                return page.copy(title = page.title.ifBlank { URI(target).host.orEmpty() })
+            } finally {
+                connection.disconnect()
             }
-            val raw = String(bytes, charsetFor(type, bytes))
-            val isHtml = "html" in type || "xml" in type || (type.isEmpty() && raw.contains("<html", ignoreCase = true))
-            val page = if (isHtml) HtmlText.extract(raw) else WebText("", raw.trim())
-            if (page.text.length < 20) throw IOException("No readable text was found on that page.")
-            return page.copy(title = page.title.ifBlank { URI(address).host.orEmpty() })
-        } finally {
-            connection.disconnect()
         }
     }
 

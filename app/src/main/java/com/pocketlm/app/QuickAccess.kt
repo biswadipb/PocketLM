@@ -19,6 +19,10 @@ object IntentActions {
     const val ASK_SCREEN = "com.pocketlm.app.ASK_SCREEN"
     const val EXTRA_SCREEN_TEXT = "screen_text"
     const val EXTRA_SCREENSHOT = "screenshot_path"
+
+    /** Opens a saved chat, such as the one a scheduled prompt left. */
+    const val OPEN_CHAT = "com.pocketlm.app.OPEN_CHAT"
+    const val EXTRA_CHAT_ID = "chat_id"
 }
 
 private fun askIntent(context: Context) =

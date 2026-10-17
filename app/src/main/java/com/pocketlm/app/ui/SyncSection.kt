@@ -164,13 +164,7 @@ internal fun SyncSection(vm: PocketViewModel) {
 
 @Composable
 private fun SyncSwitch(title: String, detail: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onChange)
-    }
+    SwitchRow(title, detail, checked, onChange, Modifier.padding(top = 8.dp))
 }
 
 @Composable

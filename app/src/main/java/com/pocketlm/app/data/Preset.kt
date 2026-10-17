@@ -28,7 +28,7 @@ object Presets {
         Preset(
             DEFAULT_ID,
             "Default",
-            "You are PocketLM, a helpful assistant running entirely on the user's phone.",
+            "You are Piko, a helpful assistant running entirely on the user's phone.",
             builtIn = true,
         ),
         Preset(

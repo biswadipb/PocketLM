@@ -1,5 +1,9 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -32,7 +36,11 @@ fun ThinkingSection(id: String, thinking: String, inProgress: Boolean, modifier:
 
     Column(modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 4.dp),
+            Modifier.fillMaxWidth()
+                .clickable(role = Role.Button, onClickLabel = if (expanded) "Hide the thought process" else "Show the thought process") { expanded = !expanded }
+                .semantics(mergeDescendants = true) { stateDescription = if (expanded) "Open" else "Closed" }
+                .heightIn(min = 48.dp)
+                .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(Icons.Filled.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -42,10 +50,7 @@ fun ThinkingSection(id: String, thinking: String, inProgress: Boolean, modifier:
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
-            Icon(
-                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "Hide the thought process" else "Show the thought process",
-            )
+            Icon(if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, contentDescription = null)
         }
         AnimatedVisibility(expanded) {
             Text(

@@ -1,5 +1,6 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.Role
 import android.text.format.Formatter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -179,7 +180,7 @@ private fun ModelCard(
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Column(Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
+            Column(Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Show or hide the files", onClick = onToggle)) {
                 Text(model.title ?: model.id, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                 Text(
                     if (model.downloads < 0) "${compact(model.likes)} votes"

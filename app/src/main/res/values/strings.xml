@@ -1,11 +1,12 @@
 <resources>
     <string name="app_name">PocketLM</string>
-    <string name="ask_label">Ask PocketLM</string>
+    <string name="ask_label">Ask Piko</string>
+    <string name="assistant_name">Piko</string>
     <string name="ask_short">Ask</string>
-    <string name="widget_text">Ask PocketLM…</string>
+    <string name="widget_text">Ask Piko…</string>
     <string name="widget_description">Opens PocketLM ready for your question</string>
-    <string name="text_explain">Explain with PocketLM</string>
-    <string name="text_translate">Translate with PocketLM</string>
-    <string name="text_summarise">Summarise with PocketLM</string>
-    <string name="text_improve">Improve with PocketLM</string>
+    <string name="text_explain">Explain with Piko</string>
+    <string name="text_translate">Translate with Piko</string>
+    <string name="text_summarise">Summarise with Piko</string>
+    <string name="text_improve">Improve with Piko</string>
 </resources>

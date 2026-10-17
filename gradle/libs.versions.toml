@@ -14,6 +14,7 @@ mlkitTextLatin = "19.0.1"
 mlkitTextScripts = "16.0.1"
 playServicesBase = "18.11.1"
 junit = "4.13.2"
+xz = "1.10"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -39,6 +40,7 @@ mlkit-text-devanagari = { group = "com.google.android.gms", name = "play-service
 mlkit-text-japanese = { group = "com.google.android.gms", name = "play-services-mlkit-text-recognition-japanese", version.ref = "mlkitTextScripts" }
 mlkit-text-korean = { group = "com.google.android.gms", name = "play-services-mlkit-text-recognition-korean", version.ref = "mlkitTextScripts" }
 play-services-base = { group = "com.google.android.gms", name = "play-services-base", version.ref = "playServicesBase" }
+xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 json = { group = "org.json", name = "json", version = "20240303" }
 

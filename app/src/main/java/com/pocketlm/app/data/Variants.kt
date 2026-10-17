@@ -1,7 +1,7 @@
 package com.pocketlm.app.data
 
 /** One version of a reply. */
-data class Reply(val text: String, val stats: GenStats? = null)
+data class Reply(val text: String, val stats: GenStats? = null, val sources: List<SourceRef> = emptyList())
 
 /** The versions of one reply other than the one on screen, and where the one on screen sits among all of them. */
 data class OtherReplies(val others: List<Reply> = emptyList(), val position: Int = 0)

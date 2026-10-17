@@ -12,7 +12,8 @@ class FoundNote(val stamp: NoteStamp, val uri: Uri, val kind: NotesRules.Kind)
 
 /**
  * Looks through a folder the user chose with Android's folder picker (it can be inside Google Drive, Dropbox, Nextcloud
- * or any other storage app) and reads the notes in it. The folder is only ever read.
+ * or any other storage app) and reads the notes in it. Reading never changes the folder; saving a reply or a chat into
+ * it is done separately by [NotesWriter], and only where the person allowed it.
  */
 class NotesScanner(private val context: Context) {
 
@@ -73,14 +74,29 @@ class NotesScanner(private val context: Context) {
     }
 
     companion object {
-        /** Keeps read access to the chosen folder after the app is closed or the phone restarts. */
+        private const val READ = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+        private const val WRITE = android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+        /**
+         * Keeps access to the chosen folder after the app is closed or the phone restarts: reading, and also writing when
+         * the storage app allows it (needed to save replies and chats into the folder).
+         */
         fun persistPermission(context: Context, uri: Uri) {
-            context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, READ or WRITE)
+            } catch (e: SecurityException) {
+                context.contentResolver.takePersistableUriPermission(uri, READ)
+            }
         }
 
         fun releasePermission(context: Context, uri: Uri) {
-            runCatching { context.contentResolver.releasePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            runCatching { context.contentResolver.releasePersistableUriPermission(uri, READ or WRITE) }
+            runCatching { context.contentResolver.releasePersistableUriPermission(uri, READ) }
         }
+
+        /** True if the app may add files to [uri]. A folder chosen before saving existed has to be chosen again. */
+        fun canWrite(context: Context, uri: Uri): Boolean =
+            context.contentResolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
     }
 
     /** The plain text of a note, or null if it has none worth keeping. */

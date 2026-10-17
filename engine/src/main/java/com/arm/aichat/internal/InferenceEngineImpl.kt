@@ -111,6 +111,10 @@ internal class InferenceEngineImpl private constructor(
     @FastNative
     private external fun setSchemaGrammar(schema: String): Int
 
+    private external fun nativeMarkCheckpoint(): Boolean
+
+    private external fun nativeReturnToCheckpoint(): Int
+
     private external fun applyChatTemplate(name: String): Int
 
     private external fun attachDraft(path: String): Int
@@ -377,7 +381,7 @@ internal class InferenceEngineImpl private constructor(
             check(_state.value is InferenceEngine.State.ModelReady) {
                 "Cannot restore a chat in ${_state.value.javaClass.simpleName}!"
             }
-            check(_readyForSystemPrompt) { "A chat must be restored ** RIGHT AFTER ** the model loaded!" }
+            // Restoring starts the model's memory over, so it is allowed whenever the model is idle, not only right after loading.
             _state.value = InferenceEngine.State.ProcessingSystemPrompt
             try {
                 when (restoreChatState(pathPrefix, tag)) {
@@ -431,13 +435,27 @@ internal class InferenceEngineImpl private constructor(
         }
     }
 
-    override suspend fun setOutputGrammar(gbnf: String) {
+    override suspend fun setOutputGrammar(gbnf: String): Boolean =
         withContext(llamaDispatcher) {
             check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
             val result = setGrammar(gbnf)
             if (result != 0) Log.w(TAG, "Could not set the output grammar, code $result")
+            result == 0
         }
-    }
+
+    override suspend fun markCheckpoint(): Boolean =
+        withContext(llamaDispatcher) {
+            _state.value is InferenceEngine.State.ModelReady && nativeMarkCheckpoint()
+        }
+
+    override suspend fun returnToCheckpoint(): Boolean =
+        withContext(llamaDispatcher) {
+            // The engine may have been unloaded or restarted meanwhile; the native side then knows there is nothing to go back to.
+            if (!_state.value.isModelLoaded) return@withContext false
+            val result = nativeReturnToCheckpoint()
+            if (result != 0) Log.w(TAG, "Could not return to the checkpoint, code $result")
+            result == 0
+        }
 
     override suspend fun setOutputSchema(jsonSchema: String): Boolean =
         withContext(llamaDispatcher) {

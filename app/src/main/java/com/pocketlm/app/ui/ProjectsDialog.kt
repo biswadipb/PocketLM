@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.Role
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,7 +74,7 @@ fun ProjectsDialog(
                     projects.forEach { p ->
                         val count = chats.count { it.projectId == p.id }
                         Row(
-                            Modifier.fillMaxWidth().clickable { editing = p.id }.padding(vertical = 10.dp),
+                            Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Edit this project") { editing = p.id }.heightIn(min = 48.dp).padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -159,7 +161,7 @@ fun ProjectsDialog(
                     inProject.take(6).forEach { chat ->
                         Text(
                             chat.title,
-                            Modifier.fillMaxWidth().clickable { onOpenChat(chat) }.padding(vertical = 8.dp),
+                            Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Open this chat") { onOpenChat(chat) }.heightIn(min = 48.dp).padding(vertical = 8.dp),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )

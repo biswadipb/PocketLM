@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import android.text.format.Formatter
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -107,10 +109,7 @@ fun ModelSettingsDialog(
                 )
 
                 Heading("Writing style")
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Use settings for this model only", Modifier.weight(1f))
-                    Switch(checked = ownStyle, onCheckedChange = { ownStyle = it })
-                }
+                SwitchRow(title = "Use settings for this model only", description = null, checked = ownStyle, onCheckedChange = { ownStyle = it })
                 if (ownStyle) {
                     Column(Modifier.padding(top = 8.dp)) { GenerationControls(params, maxThreads) { params = it } }
                 }
@@ -261,7 +260,7 @@ fun ModelSettingsDialog(
 private fun Heading(text: String) {
     Text(
         text,
-        Modifier.padding(top = 16.dp, bottom = 4.dp),
+        Modifier.padding(top = 16.dp, bottom = 4.dp).semantics { heading() },
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.primary,
     )

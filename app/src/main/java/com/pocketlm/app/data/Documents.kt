@@ -67,6 +67,20 @@ class DocumentStore(private val context: Context) {
         File(dir, "$id.txt").delete()
     }
 
+    /** Makes a second copy of an attached document (for a branched chat); null if it cannot be copied. */
+    suspend fun copy(attachment: Attachment): Attachment? = withContext(Dispatchers.IO) {
+        val source = File(dir, "${attachment.id}.txt").takeIf { it.isFile } ?: return@withContext null
+        val id = UUID.randomUUID().toString()
+        try {
+            source.copyTo(File(dir, "$id.txt"))
+            File(dir, "${attachment.id}.emb").takeIf { it.isFile }?.copyTo(File(dir, "$id.emb"))
+            attachment.copy(id = id)
+        } catch (e: IOException) {
+            File(dir, "$id.txt").delete()
+            null
+        }
+    }
+
     /** Saved vectors for a document (see [EmbeddingFile]), or null if there are none. */
     suspend fun readVectors(id: String): ByteArray? = withContext(Dispatchers.IO) {
         File(dir, "$id.emb").takeIf { it.isFile }?.readBytes()

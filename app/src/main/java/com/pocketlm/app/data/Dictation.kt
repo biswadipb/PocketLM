@@ -73,6 +73,38 @@ object Audio {
         return samples.copyOfRange((first - keep).coerceAtLeast(0), (last + keep).coerceAtMost(samples.size))
     }
 
+    /**
+     * [samples] cut into pieces of at most [maxSeconds], each cut made at the quietest moment within the last few seconds
+     * of its piece so a word is not cut in two. Nothing is lost: the pieces put together are [samples].
+     */
+    fun split(samples: FloatArray, sampleRate: Int, maxSeconds: Int = 30): List<FloatArray> {
+        val max = sampleRate * maxSeconds
+        if (samples.size <= max || max <= 0) return listOf(samples)
+        val frame = (sampleRate * FRAME_MS / 1000).coerceAtLeast(1)
+        val search = sampleRate * 4
+        val out = ArrayList<FloatArray>()
+        var start = 0
+        while (samples.size - start > max) {
+            val end = start + max
+            val from = (end - search).coerceAtLeast(start + frame)
+            var best = end
+            var bestLoudness = Float.MAX_VALUE
+            var at = from
+            while (at + frame <= end) {
+                val l = loudness(samples, at, at + frame)
+                if (l < bestLoudness) {
+                    bestLoudness = l
+                    best = at + frame / 2
+                }
+                at += frame
+            }
+            out += samples.copyOfRange(start, best)
+            start = best
+        }
+        out += samples.copyOfRange(start, samples.size)
+        return out
+    }
+
     /** The loudest point of [samples], 0 to 1. */
     fun peak(samples: FloatArray): Float = samples.maxOfOrNull { abs(it) } ?: 0f
 }

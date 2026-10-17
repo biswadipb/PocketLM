@@ -24,6 +24,8 @@ data class StoredMessage(
     val starred: Boolean = false,
     /** Photos after the first one ([imagePath]), when a message carries several. */
     val moreImages: List<String> = emptyList(),
+    /** The passages from documents and notes the model was shown for this reply. */
+    val sources: List<SourceRef> = emptyList(),
 ) {
     /** Every photo sent with this message, in order. */
     val images: List<String> get() = listOfNotNull(imagePath) + moreImages
@@ -72,6 +74,8 @@ data class SavedChat(
     val thinking: Boolean = true,
     /** Whether this chat searches the user's notes folder; null follows the app-wide choice at the time. */
     val useNotes: Boolean? = null,
+    /** A grammar (GBNF) the replies in this chat must follow, or null. It replaces JSON mode while it is set. */
+    val grammar: String? = null,
 )
 
 /** Saves each conversation as a small JSON file in the app's private storage. */
@@ -119,6 +123,7 @@ object ChatCodec {
         .apply { chat.projectId?.let { put("projectId", it) } }
         .apply { if (!chat.thinking) put("thinking", false) }
         .apply { chat.useNotes?.let { put("useNotes", it) } }
+        .apply { chat.grammar?.let { put("grammar", it) } }
         .put(
             "attachments",
             JSONArray(chat.attachments.map {
@@ -134,9 +139,13 @@ object ChatCodec {
                     putStats(this, m.stats)
                     if (m.summary) put("summary", true)
                     if (m.starred) put("starred", true)
+                    if (m.sources.isNotEmpty()) put("sources", Sources.toJson(m.sources))
                     if (m.others.isNotEmpty()) {
                         put("others", JSONArray(m.others.map { r ->
-                            JSONObject().put("text", r.text).also { putStats(it, r.stats) }
+                            JSONObject().put("text", r.text).also {
+                                putStats(it, r.stats)
+                                if (r.sources.isNotEmpty()) it.put("sources", Sources.toJson(r.sources))
+                            }
                         }))
                         put("position", m.position)
                     }
@@ -163,6 +172,7 @@ object ChatCodec {
             projectId = o.optString("projectId", "").ifEmpty { null },
             thinking = o.optBoolean("thinking", true),
             useNotes = if (o.has("useNotes")) o.optBoolean("useNotes") else null,
+            grammar = o.optString("grammar", "").ifEmpty { null },
             attachments = List(att?.length() ?: 0) {
                 val a = att!!.getJSONObject(it)
                 Attachment(a.getString("id"), a.getString("name"), a.optInt("chars"))
@@ -178,11 +188,12 @@ object ChatCodec {
                     summary = m.optBoolean("summary", false),
                     others = List(others?.length() ?: 0) {
                         val r = others!!.getJSONObject(it)
-                        Reply(r.getString("text"), readStats(r))
+                        Reply(r.getString("text"), readStats(r), Sources.fromJson(r.optJSONArray("sources")))
                     },
                     position = m.optInt("position", 0),
                     starred = m.optBoolean("starred", false),
                     moreImages = MessageImages.paths(m).drop(1),
+                    sources = Sources.fromJson(m.optJSONArray("sources")),
                 )
             },
         )

@@ -20,7 +20,7 @@ class ChatExportTest {
         assertTrue(md.startsWith("# Maths\n"))
         assertTrue(md.contains("Model: qwen2.5-0.5b-q4"))
         assertTrue(md.contains("## You\n\nWhat is 2+2?"))
-        assertTrue(md.contains("## PocketLM\n\nIt is **4**."))
+        assertTrue(md.contains("## Piko\n\nIt is **4**."))
         assertTrue(md.endsWith("\n"))
     }
 
@@ -28,7 +28,7 @@ class ChatExportTest {
     fun photosAreNotedAndEmptyReplyIsSkipped() {
         val md = ChatExport.toMarkdown("T", messages, null, null)
         assertTrue(md.contains("[Photo attached]"))
-        assertEquals(1, Regex("## PocketLM").findAll(md).count())
+        assertEquals(1, Regex("## Piko").findAll(md).count())
         assertFalse(md.contains("Model:"))
     }
 

@@ -139,6 +139,10 @@ class MainActivity : FragmentActivity() {
     /** Text shared from another app, or selected and sent through the text selection menu. */
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
+        if (intent.action == IntentActions.OPEN_CHAT) {
+            intent.getStringExtra(IntentActions.EXTRA_CHAT_ID)?.let(vm::openChatById)
+            return
+        }
         if (intent.action == IntentActions.ASK_SCREEN) {
             vm.receiveScreen(intent.getStringExtra(IntentActions.EXTRA_SCREEN_TEXT), intent.getStringExtra(IntentActions.EXTRA_SCREENSHOT))
             return

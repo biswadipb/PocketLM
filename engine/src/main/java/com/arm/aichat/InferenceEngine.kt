@@ -91,15 +91,30 @@ interface InferenceEngine {
 
     /**
      * Constrains further output to a GBNF grammar (for example valid JSON), or lifts the
-     * constraint when [gbnf] is empty. Call between messages.
+     * constraint when [gbnf] is empty. Call between messages. Returns false if the engine
+     * could not use the grammar (the previous constraint then stays in force).
      */
-    suspend fun setOutputGrammar(gbnf: String)
+    suspend fun setOutputGrammar(gbnf: String): Boolean
 
     /**
      * Constrains further output to JSON that follows [jsonSchema] (a JSON Schema document).
      * Returns false if the schema could not be used. Call between messages.
      */
     suspend fun setOutputSchema(jsonSchema: String): Boolean
+
+    /**
+     * Remembers where the conversation is, so a side question (such as asking for a title) can be put to the model and
+     * then forgotten with [returnToCheckpoint], instead of replaying the conversation afterwards. False if there is no
+     * conversation to remember.
+     */
+    suspend fun markCheckpoint(): Boolean
+
+    /**
+     * Forgets everything said since [markCheckpoint]. True when the conversation is back exactly as it was; false when
+     * that was not possible (the conversation was started over meanwhile, or this model's memory cannot forget the end
+     * of a conversation), in which case the caller has to rebuild the model's memory of the chat.
+     */
+    suspend fun returnToCheckpoint(): Boolean
 
     /**
      * Empty when no adapters were asked for; otherwise says which could not be used. Valid after [loadModel].

@@ -1,5 +1,8 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -94,6 +97,9 @@ fun SettingsScreen(
     val catalogUpdates by vm.catalogUpdates.collectAsStateWithLifecycle()
     val ocrStatus by vm.ocrStatus.collectAsStateWithLifecycle()
     val saveStates by vm.saveStates.collectAsStateWithLifecycle()
+    val autoTitle by vm.autoTitle.collectAsStateWithLifecycle()
+    val wikiStatus by vm.wikiStatus.collectAsStateWithLifecycle()
+    val autoTags by vm.autoTags.collectAsStateWithLifecycle()
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var addingNote by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -101,6 +107,7 @@ fun SettingsScreen(
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
     val apiHttps by vm.apiHttps.collectAsStateWithLifecycle()
+    val apiSwitchModels by vm.apiSwitchModels.collectAsStateWithLifecycle()
     val apiCertificate by vm.apiCertificate.collectAsStateWithLifecycle()
     val apiKey by vm.apiKey.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -178,18 +185,14 @@ fun SettingsScreen(
             )
 
             SectionTitle("Local API server", Modifier.padding(top = 24.dp))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Let other apps use this model")
-                    Text(
-                        "Starts an OpenAI-compatible server on this phone, so tools on your Wi-Fi can chat with the " +
-                            "loaded model. Keep PocketLM open with a model loaded.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = apiEnabled, onCheckedChange = vm::setApiEnabled)
-            }
+            SwitchRow(
+                title = "Let other apps use this model",
+                description = "Starts an OpenAI-compatible server on this phone, so tools on your Wi-Fi can chat with the " +
+                    "loaded model. Keep PocketLM open with a model loaded.",
+                checked = apiEnabled,
+                onCheckedChange = vm::setApiEnabled,
+                modifier = Modifier.padding(top = 4.dp),
+            )
             if (apiEnabled) {
                 when (val status = apiStatus) {
                     is ApiStatus.Running -> {
@@ -229,17 +232,13 @@ fun SettingsScreen(
                         enabled = portText != apiPort.toString() && portText.isNotEmpty(),
                     ) { Text("Apply") }
                 }
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Use HTTPS")
-                        Text(
-                            "Encrypts the connection with a certificate this phone makes for itself.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = apiHttps, onCheckedChange = vm::setApiHttps)
-                }
+                SwitchRow(
+                    title = "Use HTTPS",
+                    description = "Encrypts the connection with a certificate this phone makes for itself.",
+                    checked = apiHttps,
+                    onCheckedChange = vm::setApiHttps,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
                 if (apiHttps) {
                     LaunchedEffect(Unit) { vm.refreshApiCertificate() }
                     apiCertificate?.let { cert ->
@@ -260,6 +259,15 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                SwitchRow(
+                    title = "Let requests choose the model",
+                    description = "A request that names a downloaded model in its \"model\" field loads it first, which takes a moment and " +
+                        "stays loaded afterwards. GET /v1/models then lists every downloaded chat model. Off by default, since loading " +
+                        "a big model can use up the phone's memory.",
+                    checked = apiSwitchModels,
+                    onCheckedChange = vm::setApiSwitchModels,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
                 Text(
                     if (apiHttps) {
                         "Send the key as an Authorization: Bearer header. Anyone on your network who has the key can use your model."
@@ -315,22 +323,20 @@ fun SettingsScreen(
 
             DocumentSearchSection(vm)
             NotesFolderSection(vm)
+            ScheduledPromptsSection(vm)
+            AutomationSection(vm)
 
             SectionTitle("Heat and battery", Modifier.padding(top = 24.dp))
             val autoThrottle by vm.autoThrottle.collectAsStateWithLifecycle()
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Slow down when the phone is hot or low on battery")
-                    Text(
-                        "Uses fewer processor threads and shortens replies while the phone is warm or the battery is low and not " +
-                            "charging, then goes back to normal. The context length is not changed, as that needs the model to " +
-                            "load again.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = autoThrottle, onCheckedChange = vm::setAutoThrottle)
-            }
+            SwitchRow(
+                title = "Slow down when the phone is hot or low on battery",
+                description = "Uses fewer processor threads and shortens replies while the phone is warm or the battery is low and not " +
+                    "charging, then goes back to normal. The context length is not changed, as that needs the model to " +
+                    "load again.",
+                checked = autoThrottle,
+                onCheckedChange = vm::setAutoThrottle,
+                modifier = Modifier.padding(top = 4.dp),
+            )
 
             SectionTitle("Memory", Modifier.padding(top = 24.dp))
             Text(
@@ -354,18 +360,30 @@ fun SettingsScreen(
                 }
             }
 
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Save each chat's state")
-                    Text(
-                        "Reopening a chat, or waking the model, picks up where you left off instead of reading the whole " +
-                            "chat again. Uses storage space (up to about 0.75 GB in all) that Android can take back.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = saveStates, onCheckedChange = vm::setSaveStates)
-            }
+            SwitchRow(
+                title = "Save each chat's state",
+                description = "Reopening a chat, or waking the model, picks up where you left off instead of reading the whole " +
+                    "chat again. Uses storage space (up to about 0.75 GB in all) that Android can take back.",
+                checked = saveStates,
+                onCheckedChange = vm::setSaveStates,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+
+            SwitchRow(
+                title = "Name new chats",
+                description = "After the first reply, the model gives the chat a short title. It takes a moment and the chat can " +
+                    "be renamed any time. Chats you renamed are left alone.",
+                checked = autoTitle,
+                onCheckedChange = vm::setAutoTitle,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            SwitchRow(
+                title = "File them under my tags",
+                description = "A newly named chat is also given up to two tags you already use, if they clearly fit. New tags are never invented.",
+                checked = autoTags,
+                onCheckedChange = vm::setAutoTags,
+                enabled = autoTitle,
+            )
 
             SectionTitle("Memory notes", Modifier.padding(top = 24.dp))
             Text(
@@ -376,8 +394,14 @@ fun SettingsScreen(
             )
             notes.forEach { note ->
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = note.enabled, onCheckedChange = { vm.setNoteEnabled(note, it) })
-                    Text(note.text, Modifier.weight(1f).padding(horizontal = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                    // The switch and the note are one control, so a screen reader says "I'm vegetarian, switch, on".
+                    Row(
+                        Modifier.weight(1f).toggleable(value = note.enabled, role = Role.Switch, onValueChange = { vm.setNoteEnabled(note, it) }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Switch(checked = note.enabled, onCheckedChange = null)
+                        Text(note.text, Modifier.weight(1f).padding(horizontal = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                    }
                     IconButton(onClick = { editingNote = note }) { Icon(Icons.Filled.Edit, contentDescription = "Edit note") }
                     IconButton(onClick = { vm.deleteNote(note) }) { Icon(Icons.Filled.Delete, contentDescription = "Delete note") }
                 }
@@ -385,31 +409,23 @@ fun SettingsScreen(
             TextButton(onClick = { addingNote = true }) { Text("Add a note") }
 
             SectionTitle("Model downloads", Modifier.padding(top = 24.dp))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Download on Wi-Fi only")
-                    Text(
-                        "Models are large. With this on, a download will not start on mobile data, and one in progress pauses " +
-                            "(keeping what arrived) if the phone switches to mobile data.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = wifiOnly, onCheckedChange = vm::setWifiOnly)
-            }
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Update the model list from the internet")
-                    Text(
-                        "When you open Models, PocketLM reads a small list in its repository on GitHub (at most twice a day) so " +
-                            "new models can appear without a new version of the app. GitHub sees your address; nothing else is sent. " +
-                            "Only Hugging Face and ModelScope download links in it are accepted.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = catalogUpdates, onCheckedChange = vm::setCatalogUpdates)
-            }
+            SwitchRow(
+                title = "Download on Wi-Fi only",
+                description = "Models are large. With this on, a download will not start on mobile data, and one in progress pauses " +
+                    "(keeping what arrived) if the phone switches to mobile data.",
+                checked = wifiOnly,
+                onCheckedChange = vm::setWifiOnly,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            SwitchRow(
+                title = "Update the model list from the internet",
+                description = "When you open Models, PocketLM reads a small list in its repository on GitHub (at most twice a day) so " +
+                    "new models can appear without a new version of the app. GitHub sees your address; nothing else is sent. " +
+                    "Only Hugging Face and ModelScope download links in it are accepted.",
+                checked = catalogUpdates,
+                onCheckedChange = vm::setCatalogUpdates,
+                modifier = Modifier.padding(top = 8.dp),
+            )
             Text(
                 "Models from Hugging Face are checked against the checksum it publishes when the download finishes; a file " +
                     "that does not match is deleted. Models from other sites, and files you import, are not checked.",
@@ -456,13 +472,17 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             ToolId.entries.forEach { tool ->
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(tool.label)
-                        Text(tool.blurb, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(checked = tool in enabledTools, onCheckedChange = { vm.setToolEnabled(tool, it) })
-                }
+                SwitchRow(
+                    title = tool.label,
+                    description = if (tool == ToolId.Wikipedia && wikiStatus.configured && wikiStatus.problem == null) {
+                        "Looks up facts in the Wikipedia file on this phone. Nothing is sent anywhere."
+                    } else {
+                        tool.blurb
+                    },
+                    checked = tool in enabledTools,
+                    onCheckedChange = { vm.setToolEnabled(tool, it) },
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
 
             if (ToolId.WebSearch in enabledTools) {
@@ -513,48 +533,41 @@ fun SettingsScreen(
                 )
             }
 
+            RemindersSection(vm, toolOn = ToolId.Reminder in enabledTools)
+
+            WikipediaSection(vm)
+
             SectionTitle("Notifications", Modifier.padding(top = 24.dp))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Keep replies going in the background")
-                    Text(
-                        "A long reply carries on when you switch apps or the screen turns off, and you get a " +
-                            "notification when it is ready. A small notification shows while one is being written.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = backgroundReplies, onCheckedChange = vm::setBackgroundReplies)
-            }
+            SwitchRow(
+                title = "Keep replies going in the background",
+                description = "A long reply carries on when you switch apps or the screen turns off, and you get a " +
+                    "notification when it is ready. A small notification shows while one is being written.",
+                checked = backgroundReplies,
+                onCheckedChange = vm::setBackgroundReplies,
+                modifier = Modifier.padding(top = 4.dp),
+            )
 
             SectionTitle("Voice", Modifier.padding(top = 24.dp))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Read replies aloud")
-                    Text(
-                        "Speak each reply when it finishes, using your phone's voice. " +
-                            "You can also tap the speaker on any reply. Code blocks are skipped.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = readAloud, onCheckedChange = vm::setReadAloud)
-            }
+            SwitchRow(
+                title = "Read replies aloud",
+                description = "Speak each reply when it finishes, using your phone's voice. " +
+                    "You can also tap the speaker on any reply. Code blocks are skipped.",
+                checked = readAloud,
+                onCheckedChange = vm::setReadAloud,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            NaturalVoiceSection(vm)
             OfflineDictationSection(vm)
 
             SectionTitle("Privacy", Modifier.padding(top = 24.dp))
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Require unlock")
-                    Text(
-                        "Ask for your fingerprint, face or screen lock when opening the app. " +
-                            "Also hides it in recent apps and blocks screenshots.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = lockEnabled, onCheckedChange = vm::setAppLock)
-            }
+            SwitchRow(
+                title = "Require unlock",
+                description = "Ask for your fingerprint, face or screen lock when opening the app. " +
+                    "Also hides it in recent apps and blocks screenshots.",
+                checked = lockEnabled,
+                onCheckedChange = vm::setAppLock,
+                modifier = Modifier.padding(top = 4.dp),
+            )
 
             SectionTitle("Tools", Modifier.padding(top = 24.dp))
             TextButton(onClick = onOpenBenchmark, Modifier.fillMaxWidth()) {
@@ -747,7 +760,7 @@ private fun PresetDialog(initial: Preset, onSave: (Preset) -> Unit, onDismiss: (
 
 @Composable
 internal fun SectionTitle(text: String, modifier: Modifier = Modifier) {
-    Text(text, modifier, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+    Text(text, modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
 }
 
 @Composable

@@ -1,5 +1,6 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -47,7 +48,7 @@ fun StarredScreen(vm: PocketViewModel, onBack: () -> Unit, onOpened: () -> Unit,
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(items, key = { it.chatId + "#" + it.index }) { item ->
                     Card(
-                        Modifier.fillMaxWidth().clickable {
+                        Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Open this message in its chat") {
                             chats.firstOrNull { it.id == item.chatId }?.let {
                                 vm.openChat(it, scrollToMessage = item.index)
                                 onOpened()

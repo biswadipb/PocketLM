@@ -56,6 +56,14 @@ object NoteSuggestions {
         return out
     }
 
+    /** Whether [fact] is already among [known], allowing for different wording of the same thing. */
+    fun isKnown(fact: String, known: List<String>): Boolean {
+        val k = key(fact)
+        if (k.isEmpty()) return true
+        return known.map(::key).filter { it.isNotEmpty() }
+            .any { it == k || (minOf(it.length, k.length) >= 8 && (it in k || k in it)) }
+    }
+
     private fun tidy(line: String): String =
         line.trim()
             .replace(Regex("""^\s*(?:[-*•–]|\d+[.)])\s*"""), "")

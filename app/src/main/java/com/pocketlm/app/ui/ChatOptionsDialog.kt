@@ -1,5 +1,7 @@
 package com.pocketlm.app.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,7 +27,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import com.pocketlm.app.data.Gbnf
 import com.pocketlm.app.data.JsonSchema
 import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.Project
@@ -40,6 +46,7 @@ fun ChatOptionsDialog(
     defaultPresetId: String,
     jsonMode: Boolean,
     jsonSchema: String?,
+    grammar: String?,
     thinkingSupported: Boolean,
     thinking: Boolean,
     onThinking: (Boolean) -> Unit,
@@ -53,6 +60,8 @@ fun ChatOptionsDialog(
     onPreset: (String?) -> Unit,
     onJsonMode: (Boolean) -> Unit,
     onJsonSchema: (String?) -> Unit,
+    onGrammar: (String?) -> Unit,
+    onSaveToNotes: (() -> Unit)?,
     canSummarise: Boolean,
     onSummarise: () -> Unit,
     onSuggestNotes: () -> Unit,
@@ -61,6 +70,14 @@ fun ChatOptionsDialog(
     onDismiss: () -> Unit,
 ) {
     var editingSchema by remember { mutableStateOf(false) }
+    var editingGrammar by remember { mutableStateOf(false) }
+    if (editingGrammar) {
+        GrammarDialog(
+            initial = grammar,
+            onSave = { onGrammar(it); editingGrammar = false },
+            onDismiss = { editingGrammar = false },
+        )
+    }
     if (editingSchema) {
         SchemaDialog(
             initial = jsonSchema,
@@ -102,40 +119,34 @@ fun ChatOptionsDialog(
 
                 if (thinkingSupported) {
                     Heading("Thinking")
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "This model can think before it answers. Turn it off to get answers straight away, which is much " +
-                                "faster on a phone but can be less careful with maths and puzzles. Applies to your next message.",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Switch(checked = thinking, onCheckedChange = onThinking)
-                    }
+                    SwitchRow(
+                        title = "Think before answering",
+                        description = "This model can think before it answers. Turn it off to get answers straight away, which is much " +
+                            "faster on a phone but can be less careful with maths and puzzles. Applies to your next message.",
+                        checked = thinking,
+                        onCheckedChange = onThinking,
+                    )
                 }
 
                 if (notesFolder != null) {
                     Heading("My notes")
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Look for the answer in your notes folder ($notesFolder) too, and show the model the passages it finds. " +
-                                "They stay on this phone.",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Switch(checked = useNotes, onCheckedChange = onUseNotes)
-                    }
+                    SwitchRow(
+                        title = "Search my notes",
+                        description = "Look for the answer in your notes folder ($notesFolder) too, and show the model the passages it " +
+                            "finds. They stay on this phone.",
+                        checked = useNotes,
+                        onCheckedChange = onUseNotes,
+                    )
                 }
 
                 Heading("JSON output")
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Only allow valid JSON in replies. Ask for what you want in your message, for example " +
-                            "\"List three fruits as a JSON object\".",
-                        Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Switch(checked = jsonMode, onCheckedChange = onJsonMode)
-                }
+                SwitchRow(
+                    title = "Only valid JSON",
+                    description = "Only allow valid JSON in replies. Ask for what you want in your message, for example " +
+                        "\"List three fruits as a JSON object\".",
+                    checked = jsonMode,
+                    onCheckedChange = onJsonMode,
+                )
                 if (jsonMode) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
@@ -148,6 +159,22 @@ fun ChatOptionsDialog(
                         }
                         if (jsonSchema != null) TextButton(onClick = { onJsonSchema(null) }) { Text("Remove") }
                     }
+                }
+
+                Heading("Custom grammar")
+                Text(
+                    "Only allow replies that fit rules you write, for example one word from a list, or a bullet list. " +
+                        "It replaces JSON output while it is on. Models that think first should have thinking switched off.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (grammar != null) "Replies must follow your grammar." else "No grammar.",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(onClick = { editingGrammar = true }) { Text(if (grammar != null) "Edit grammar" else "Use a grammar") }
+                    if (grammar != null) TextButton(onClick = { onGrammar(null) }) { Text("Remove") }
                 }
 
                 Heading("This conversation")
@@ -167,9 +194,17 @@ fun ChatOptionsDialog(
                 if (onShowPrompt != null) {
                     TextButton(onClick = onShowPrompt) { Text("Show what the model received") }
                 }
-                if (onShareChat != null) {
+                if (onShareChat != null || onSaveToNotes != null) {
                     Heading("Share")
-                    TextButton(onClick = onShareChat) { Text("Share this chat as text") }
+                    if (onShareChat != null) TextButton(onClick = onShareChat) { Text("Share this chat as text") }
+                    if (onSaveToNotes != null) {
+                        TextButton(onClick = onSaveToNotes) { Text("Save this chat to my notes") }
+                        Text(
+                            "Adds a Markdown file to a PocketLM folder inside your notes folder. Nothing already there is changed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 Text(
                     "Changing the model or prompt reloads the model and replays this chat on your next message.",
@@ -187,7 +222,7 @@ fun ChatOptionsDialog(
 private fun Heading(text: String) {
     Text(
         text,
-        Modifier.padding(top = 12.dp, bottom = 4.dp),
+        Modifier.padding(top = 12.dp, bottom = 4.dp).semantics { heading() },
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.primary,
     )
@@ -227,6 +262,49 @@ private fun SchemaDialog(initial: String?, onSave: (String) -> Unit, onDismiss: 
             }
         },
         confirmButton = { TextButton(onClick = { onSave(text) }, enabled = problem == null) { Text("Use schema") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Typing a grammar the replies must follow, with a few to start from. */
+@Composable
+private fun GrammarDialog(initial: String?, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial ?: Gbnf.examples.first().grammar) }
+    val problem = Gbnf.problem(text)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Grammar") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Start from an example:", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Gbnf.examples.forEach { example ->
+                        AssistChip(onClick = { text = example.grammar }, label = { Text(example.name) })
+                    }
+                }
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Rules") },
+                    isError = problem != null,
+                    supportingText = { Text(problem ?: "Replies will fit these rules. The rule called root describes the whole reply.") },
+                    minLines = 4,
+                    maxLines = 12,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                )
+                Text(
+                    "Write a rule as  name ::= what it may contain. Text goes in quotes, [a-z] means one letter, | means or, " +
+                        "and * + ? {2,5} say how often. Write a new line inside quotes as \\n.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }, enabled = problem == null) { Text("Use grammar") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

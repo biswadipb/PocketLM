@@ -21,6 +21,10 @@ object Verification {
 
     /** Asks the server which SHA-256 the file at [url] should have. Null when it does not say, or cannot be asked. */
     fun expectedFor(url: String): String? {
+        // A link to an Ollama registry file names the checksum in the link itself.
+        OllamaRegistry.expectedSha256(url)?.let { return it }
+        // Kiwix lists the checksum of each file next to it.
+        if (url.startsWith(Kiwix.FOLDER)) return Kiwix.expectedSha256(url)
         // Only download links of the form .../resolve/<revision>/<file> carry the header.
         if ("/resolve/" !in url) return null
         return try {

@@ -21,7 +21,7 @@ object ChatExport {
                     append(m.text.trim().lines().joinToString("\n") { "> $it" }).append("\n\n")
                     return@forEach
                 }
-                append(if (m.isUser) "## You\n\n" else "## PocketLM\n\n")
+                append(if (m.isUser) "## You\n\n" else "## Piko\n\n")
                 if (m.images.size > 1) append("_[${m.images.size} photos attached]_\n\n")
                 else if (m.imagePath != null) append("_[Photo attached]_\n\n")
                 val parts = Thinking.split(m.text)
@@ -31,6 +31,7 @@ object ChatExport {
                 } else {
                     append(m.text.trim()).append("\n\n")
                 }
+                if (!m.isUser && m.sources.isNotEmpty()) append("_Sources: ").append(Sources.names(m.sources)).append("_\n\n")
             }
         }.trimEnd() + "\n"
 

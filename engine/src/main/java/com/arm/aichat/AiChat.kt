@@ -4,6 +4,7 @@ import android.content.Context
 import com.arm.aichat.internal.EmbeddingEngineImpl
 import com.arm.aichat.internal.InferenceEngineImpl
 import com.arm.aichat.internal.SpeechEngineImpl
+import com.arm.aichat.internal.VoiceEngineImpl
 
 /**
  * Main entry point for Arm's AI Chat library.
@@ -16,6 +17,9 @@ object AiChat {
 
     /** The single speech engine, for turning recorded speech into text. It shares the chat engine's native library. */
     fun getSpeechEngine(context: Context): SpeechEngine = SpeechEngineImpl.getInstance(getInferenceEngine(context))
+
+    /** The single voice engine, for turning text into speech on the phone. It shares the chat engine's native library. */
+    fun getVoiceEngine(context: Context): VoiceEngine = VoiceEngineImpl.getInstance(getInferenceEngine(context))
 
     /** The single embedding engine, for turning text into vectors. It shares the chat engine's native library. */
     fun getEmbeddingEngine(context: Context): EmbeddingEngine =
