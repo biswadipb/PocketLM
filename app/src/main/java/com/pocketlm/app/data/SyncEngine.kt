@@ -67,8 +67,9 @@ object SyncChats {
         val docs = LinkedHashSet<String>()
         chat.optJSONArray("messages")?.let { msgs ->
             for (i in 0 until msgs.length()) {
-                val path = msgs.optJSONObject(i)?.optString("image").orEmpty()
-                if (path.isNotEmpty()) File(path).name.takeIf(SyncNames::validImage)?.let { images += it }
+                msgs.optJSONObject(i)?.let { m ->
+                    MessageImages.paths(m).forEach { path -> File(path).name.takeIf(SyncNames::validImage)?.let { images += it } }
+                }
             }
         }
         chat.optJSONArray("attachments")?.let { atts ->
@@ -98,9 +99,7 @@ object SyncChats {
         chat.optJSONArray("messages")?.let { msgs ->
             for (i in 0 until msgs.length()) {
                 val m = msgs.optJSONObject(i) ?: continue
-                val path = m.optString("image")
-                if (path.isEmpty()) continue
-                if (SyncNames.validImage(File(path).name)) m.put("image", transform(path)) else m.remove("image")
+                MessageImages.rewrite(m) { path -> if (SyncNames.validImage(File(path).name)) transform(path) else null }
             }
         }
         return chat
@@ -261,7 +260,7 @@ class SyncEngine(
         }
         val remote = SyncHeader.fromJson(String(bytes, Charsets.UTF_8), minIterations = 1)
         if (!remote.sameKeyAs(header)) {
-            throw SyncException("The sync location now uses a different passphrase. Disconnect and connect again.")
+            throw SyncPassphraseChangedException()
         }
     }
 

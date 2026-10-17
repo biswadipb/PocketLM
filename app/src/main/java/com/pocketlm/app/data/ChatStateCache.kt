@@ -11,7 +11,10 @@ object ChatState {
     private const val FORMAT = 1
 
     /** A saved state is used again only when this label is identical to the one it was saved under. */
-    fun tag(modelId: String, contextSize: Int, template: String, systemPrompt: String, turns: List<Turn>): String {
+    fun tag(
+        modelId: String, contextSize: Int, template: String, systemPrompt: String, turns: List<Turn>, adapters: String = "",
+        cacheBits: Int = 16,
+    ): String {
         val chat = MessageDigest.getInstance("SHA-256")
         for (turn in turns) {
             chat.update(byteArrayOf(if (turn.isUser) 1 else 0, if (turn.summary) 1 else 0))
@@ -20,9 +23,16 @@ object ChatState {
             chat.update(0)
             chat.update(bytes)
         }
-        return listOf(
-            "v$FORMAT", modelId, contextSize.toString(), template, hash(systemPrompt), turns.size.toString(), hex(chat.digest()),
-        ).joinToString("|")
+        // Adapters change what the model says, so a state made with other adapters must not be reused. Without
+        // adapters the label is as it always was, so states saved before adapters existed still apply.
+        return (
+            listOf("v$FORMAT", modelId, contextSize.toString(), template, hash(systemPrompt), turns.size.toString(), hex(chat.digest())) +
+                listOfNotNull(
+                    adapters.takeIf { it.isNotEmpty() }?.let { "lora:" + hash(it) },
+                    // A state saved with a compressed cache cannot be loaded into a normal one, or the other way round.
+                    cacheBits.takeIf { it != 16 }?.let { "kv$it" },
+                )
+            ).joinToString("|")
     }
 
     fun modelId(fileName: String, sizeBytes: Long, modifiedMs: Long) = "$fileName:$sizeBytes:$modifiedMs"
@@ -78,6 +88,9 @@ class ChatStateCache(private val context: Context) {
     fun maxBytes(): Long = StatePolicy.maxBytes(dir.usableSpace)
 
     suspend fun delete(chatId: String) = withContext(Dispatchers.IO) { remove(fileKey(chatId)) }
+
+    /** The same as [delete] for code that already runs off the main thread. */
+    fun deleteNow(chatId: String) = remove(fileKey(chatId))
 
     suspend fun clear() = withContext(Dispatchers.IO) { dir.listFiles()?.forEach { it.delete() } }
 

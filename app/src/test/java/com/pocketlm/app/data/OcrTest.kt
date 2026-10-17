@@ -32,3 +32,29 @@ class OcrTest {
         assertTrue(Ocr.renderSize(1, 100000).first >= 1)
     }
 }
+
+class OcrScriptTest {
+    @Test
+    fun aSavedIdFindsItsScript() {
+        assertEquals(OcrScript.Japanese, OcrScript.fromId("japanese"))
+        assertEquals(OcrScript.Devanagari, OcrScript.fromId("devanagari"))
+    }
+
+    @Test
+    fun anythingUnknownMeansLatin() {
+        assertEquals(OcrScript.Latin, OcrScript.fromId(null))
+        assertEquals(OcrScript.Latin, OcrScript.fromId("klingon"))
+    }
+
+    @Test
+    fun everyScriptHasADistinctSavedId() {
+        assertEquals(OcrScript.entries.size, OcrScript.entries.map { it.id }.toSet().size)
+    }
+
+    @Test
+    fun downloadProgressIsShownAsAPercentage() {
+        assertEquals("Downloading Korean text recognition… 42%", Ocr.downloadStatus("Korean", 42, 100))
+        assertEquals("Downloading Korean text recognition…", Ocr.downloadStatus("Korean", 0, 0))
+        assertEquals("Downloading Korean text recognition… 100%", Ocr.downloadStatus("Korean", 500, 100))
+    }
+}

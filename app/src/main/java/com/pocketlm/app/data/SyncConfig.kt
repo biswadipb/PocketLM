@@ -113,6 +113,10 @@ data class SyncStatus(
     val syncSettings: Boolean = false,
     val autoSync: Boolean = true,
     val wifiOnly: Boolean = true,
+    /** How often the phone checks for changes while the app is closed, in minutes; 0 is never. */
+    val backgroundMinutes: Int = SyncSchedule.DEFAULT_MINUTES,
+    /** The passphrase was changed on another device, so the new one must be entered here. */
+    val passphraseChanged: Boolean = false,
     /** Why the last attempt to connect failed; shown in the setup dialog. */
     val connectError: String? = null,
 )
@@ -173,10 +177,13 @@ class SyncConfigStore(private val context: Context, private val box: SecretBox =
     val syncSettings: Boolean get() = prefs.getBoolean(KEY_SETTINGS, false)
     val autoSync: Boolean get() = prefs.getBoolean(KEY_AUTO, true)
     val wifiOnly: Boolean get() = prefs.getBoolean(KEY_WIFI, true)
+    val backgroundMinutes: Int get() = prefs.getInt(KEY_BACKGROUND, SyncSchedule.DEFAULT_MINUTES)
+    val passphraseChanged: Boolean get() = prefs.getBoolean(KEY_PASSPHRASE_CHANGED, false)
 
     fun setSyncSettings(on: Boolean) = prefs.edit().putBoolean(KEY_SETTINGS, on).apply()
     fun setAutoSync(on: Boolean) = prefs.edit().putBoolean(KEY_AUTO, on).apply()
     fun setWifiOnly(on: Boolean) = prefs.edit().putBoolean(KEY_WIFI, on).apply()
+    fun setBackgroundMinutes(minutes: Int) = prefs.edit().putInt(KEY_BACKGROUND, minutes).apply()
 
     fun save(target: SyncTarget, header: SyncHeader, key: ByteArray) {
         prefs.edit()
@@ -184,7 +191,7 @@ class SyncConfigStore(private val context: Context, private val box: SecretBox =
             .putString(KEY_SECRET, box.seal(target.secretJson().toString().toByteArray()))
             .putString(KEY_HEADER, header.toJson())
             .putString(KEY_KEY, box.seal(key))
-            .remove(KEY_ERROR).remove(KEY_SUMMARY)
+            .remove(KEY_ERROR).remove(KEY_SUMMARY).remove(KEY_PASSPHRASE_CHANGED)
             .apply()
     }
 
@@ -202,10 +209,11 @@ class SyncConfigStore(private val context: Context, private val box: SecretBox =
         }
     }
 
-    fun recordResult(summary: String?, error: String?) {
+    fun recordResult(summary: String?, error: String?, passphraseChanged: Boolean = false) {
         prefs.edit().apply {
             if (error == null) remove(KEY_ERROR) else putString(KEY_ERROR, error)
             if (summary != null) putString(KEY_SUMMARY, summary)
+            putBoolean(KEY_PASSPHRASE_CHANGED, passphraseChanged)
         }.apply()
     }
 
@@ -228,6 +236,8 @@ class SyncConfigStore(private val context: Context, private val box: SecretBox =
             syncSettings = syncSettings,
             autoSync = autoSync,
             wifiOnly = wifiOnly,
+            backgroundMinutes = backgroundMinutes,
+            passphraseChanged = passphraseChanged,
         )
     }
 
@@ -239,6 +249,8 @@ class SyncConfigStore(private val context: Context, private val box: SecretBox =
         const val KEY_SETTINGS = "sync_settings"
         const val KEY_AUTO = "auto"
         const val KEY_WIFI = "wifi_only"
+        const val KEY_BACKGROUND = "background_minutes"
+        const val KEY_PASSPHRASE_CHANGED = "passphrase_changed"
         const val KEY_ERROR = "last_error"
         const val KEY_SUMMARY = "last_summary"
     }

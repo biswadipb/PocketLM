@@ -63,7 +63,17 @@ class DocumentStore(private val context: Context) {
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
+        File(dir, "$id.emb").delete()
         File(dir, "$id.txt").delete()
+    }
+
+    /** Saved vectors for a document (see [EmbeddingFile]), or null if there are none. */
+    suspend fun readVectors(id: String): ByteArray? = withContext(Dispatchers.IO) {
+        File(dir, "$id.emb").takeIf { it.isFile }?.readBytes()
+    }
+
+    suspend fun writeVectors(id: String, bytes: ByteArray) = withContext(Dispatchers.IO) {
+        if (File(dir, "$id.txt").isFile) File(dir, "$id.emb").writeBytes(bytes)
     }
 
     private fun InputStream.readUpTo(max: Int): ByteArray {
@@ -144,11 +154,11 @@ class Bm25Index(private val chunks: List<Chunk>) {
 
     val isEmpty get() = chunks.isEmpty()
 
-    /**
-     * Returns the best chunks for [query] within [budgetChars], in reading order. When nothing
-     * matches (e.g. "summarise this"), falls back to the start of each document.
-     */
-    fun search(query: String, budgetChars: Int): List<Chunk> {
+    /** Every passage, in reading order: the position of a passage here is the number [rank] and [pick] use for it. */
+    val chunkList: List<Chunk> get() = chunks
+
+    /** The passages that share words with [query], best first, as positions in [chunkList]. Empty if none do. */
+    fun rank(query: String): List<Int> {
         if (chunks.isEmpty()) return emptyList()
         val terms = tokenize(query).distinct()
         val n = chunks.size.toDouble()
@@ -163,10 +173,11 @@ class Bm25Index(private val chunks: List<Chunk>) {
             }
             i to score
         }
+        return scored.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+    }
 
-        val ranked = scored.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
-        val order = ranked.ifEmpty { chunks.indices.toList() }
-
+    /** Takes passages from [order] until [budgetChars] is used (always at least one), and returns them in reading order. */
+    fun pick(order: List<Int>, budgetChars: Int): List<Chunk> {
         val picked = ArrayList<Int>()
         var used = 0
         for (i in order) {
@@ -176,6 +187,16 @@ class Bm25Index(private val chunks: List<Chunk>) {
             used += len
         }
         return picked.sorted().map { chunks[it] }
+    }
+
+    /**
+     * Returns the best chunks for [query] within [budgetChars], in reading order. When nothing
+     * matches (e.g. "summarise this"), falls back to the start of each document.
+     */
+    fun search(query: String, budgetChars: Int): List<Chunk> {
+        if (chunks.isEmpty()) return emptyList()
+        val order = rank(query).ifEmpty { chunks.indices.toList() }
+        return pick(order, budgetChars)
     }
 
     companion object {

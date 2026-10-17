@@ -1,7 +1,15 @@
 package com.pocketlm.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.dp
+import com.pocketlm.app.data.DisplayScale
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -17,7 +25,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
+private enum class Screen { Chat, History, Starred, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
+
+private val HISTORY_PANE_WIDTH = 360.dp
 
 @Composable
 fun PocketLmApp(vm: PocketViewModel = viewModel()) {
@@ -45,13 +55,44 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
     BackHandler(enabled = screen != Screen.Chat) {
         screen = when (screen) {
             Screen.Search -> Screen.Models
+            Screen.Starred -> Screen.History
             Screen.Benchmark, Screen.Storage, Screen.Compare, Screen.Logs -> Screen.Settings
             else -> Screen.Chat
         }
     }
 
+    // On a tablet, a foldable or a phone on its side, History stays in view beside the chat.
+    val wide = DisplayScale.isWide(LocalConfiguration.current.screenWidthDp)
+    LaunchedEffect(wide) {
+        if (wide && screen == Screen.History) screen = Screen.Chat
+    }
+
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         val modifier = Modifier.padding(padding)
+        if (wide && screen == Screen.Chat) {
+            val openChat by vm.openChatId.collectAsStateWithLifecycle()
+            Row(modifier.fillMaxSize()) {
+                HistoryScreen(
+                    vm,
+                    onBack = {},
+                    onOpened = {},
+                    onOpenStarred = { screen = Screen.Starred },
+                    embedded = true,
+                    selectedId = openChat,
+                    modifier = Modifier.width(HISTORY_PANE_WIDTH).fillMaxHeight(),
+                )
+                VerticalDivider()
+                ChatScreen(
+                    vm,
+                    onOpenHistory = {},
+                    onOpenModels = { screen = Screen.Models },
+                    onOpenSettings = { screen = Screen.Settings },
+                    showHistoryButton = false,
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                )
+            }
+            return@Scaffold
+        }
         when (screen) {
             Screen.Chat -> ChatScreen(
                 vm,
@@ -63,6 +104,13 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
             Screen.History -> HistoryScreen(
                 vm,
                 onBack = { screen = Screen.Chat },
+                onOpened = { screen = Screen.Chat },
+                onOpenStarred = { screen = Screen.Starred },
+                modifier = modifier,
+            )
+            Screen.Starred -> StarredScreen(
+                vm,
+                onBack = { screen = Screen.History },
                 onOpened = { screen = Screen.Chat },
                 modifier = modifier,
             )

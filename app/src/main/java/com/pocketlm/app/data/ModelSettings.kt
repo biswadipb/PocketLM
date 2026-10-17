@@ -15,6 +15,8 @@ data class ModelSettings(
     val chatTemplate: String = "",
     /** File name of a small model that drafts tokens for this one, or null for none. */
     val draftFile: String? = null,
+    /** LoRA adapters applied on top of this model. */
+    val adapters: List<AdapterSetting> = emptyList(),
 )
 
 object ModelSettingsStore {
@@ -26,6 +28,11 @@ object ModelSettingsStore {
                 .put("preset", s.presetId ?: JSONObject.NULL)
                 .put("template", s.chatTemplate)
                 .put("draft", s.draftFile ?: JSONObject.NULL)
+                .apply {
+                    if (s.adapters.isNotEmpty()) {
+                        put("loras", org.json.JSONArray(s.adapters.map { JSONObject().put("file", it.file).put("scale", it.scale.toDouble()) }))
+                    }
+                }
             s.params?.let { p ->
                 entry.put("ctx", p.contextSize)
                     .put("threads", p.threads)
@@ -35,6 +42,7 @@ object ModelSettingsStore {
                     .put("minP", p.minP.toDouble())
                     .put("repeat", p.repeatPenalty.toDouble())
                     .put("seed", p.seed)
+                    .put("cache", p.cacheBits)
             }
             root.put(file, entry)
         }
@@ -61,10 +69,21 @@ object ModelSettingsStore {
                                 minP = o.optDouble("minP", defaults.minP.toDouble()).toFloat(),
                                 repeatPenalty = o.optDouble("repeat", defaults.repeatPenalty.toDouble()).toFloat(),
                                 seed = o.optInt("seed", defaults.seed),
+                                cacheBits = o.optInt("cache", defaults.cacheBits).takeIf { it == 8 || it == 4 } ?: 16,
                             ),
                             if (o.isNull("preset")) null else o.optString("preset").ifEmpty { null },
                             o.optString("template", ""),
                             if (o.isNull("draft")) null else o.optString("draft").ifEmpty { null },
+                            o.optJSONArray("loras")?.let { a ->
+                                (0 until a.length()).mapNotNull { i ->
+                                    val l = a.optJSONObject(i) ?: return@mapNotNull null
+                                    val name = l.optString("file").takeIf { it.isNotEmpty() && '/' !in it } ?: return@mapNotNull null
+                                    AdapterSetting(
+                                        name,
+                                        l.optDouble("scale", 1.0).toFloat().coerceIn(AdapterSetting.MIN_SCALE, AdapterSetting.MAX_SCALE),
+                                    )
+                                }
+                            }.orEmpty(),
                         ),
                     )
                 }

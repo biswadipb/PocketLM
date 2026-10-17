@@ -49,8 +49,10 @@ class StorageManager(private val context: Context) {
     private fun unusedFiles(referencedImages: Set<String>, referencedDocIds: Set<String>): List<File> {
         val images = dir("images").listFiles().orEmpty().toList()
         val docs = dir("docs").listFiles().orEmpty().toList()
+        // A document may have two files: its text and its saved search vectors.
+        val unusedDocs = unusedNames(docs.map { it.nameWithoutExtension }, referencedDocIds).toSet()
         return unusedNames(images.map { it.absolutePath }, referencedImages).mapNotNull { path -> images.find { it.absolutePath == path } } +
-            unusedNames(docs.map { it.nameWithoutExtension }, referencedDocIds).mapNotNull { id -> docs.find { it.nameWithoutExtension == id } }
+            docs.filter { it.nameWithoutExtension in unusedDocs }
     }
 
     private fun size(file: File): Long =

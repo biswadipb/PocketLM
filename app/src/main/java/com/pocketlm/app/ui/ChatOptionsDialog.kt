@@ -39,12 +39,19 @@ fun ChatOptionsDialog(
     defaultPresetId: String,
     jsonMode: Boolean,
     jsonSchema: String?,
+    thinkingSupported: Boolean,
+    thinking: Boolean,
+    onThinking: (Boolean) -> Unit,
+    notesFolder: String?,
+    useNotes: Boolean,
+    onUseNotes: (Boolean) -> Unit,
     onModel: (LocalModel) -> Unit,
     onPreset: (String?) -> Unit,
     onJsonMode: (Boolean) -> Unit,
     onJsonSchema: (String?) -> Unit,
     canSummarise: Boolean,
     onSummarise: () -> Unit,
+    onSuggestNotes: () -> Unit,
     onShowPrompt: (() -> Unit)?,
     onShareChat: (() -> Unit)?,
     onDismiss: () -> Unit,
@@ -81,6 +88,32 @@ fun ChatOptionsDialog(
                     }
                 }
 
+                if (thinkingSupported) {
+                    Heading("Thinking")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "This model can think before it answers. Turn it off to get answers straight away, which is much " +
+                                "faster on a phone but can be less careful with maths and puzzles. Applies to your next message.",
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Switch(checked = thinking, onCheckedChange = onThinking)
+                    }
+                }
+
+                if (notesFolder != null) {
+                    Heading("My notes")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Look for the answer in your notes folder ($notesFolder) too, and show the model the passages it finds. " +
+                                "They stay on this phone.",
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Switch(checked = useNotes, onCheckedChange = onUseNotes)
+                    }
+                }
+
                 Heading("JSON output")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -110,6 +143,12 @@ fun ChatOptionsDialog(
                 Text(
                     "The model condenses the chat so far into a short summary and carries on from it, freeing up memory. " +
                         "Your messages stay on screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = onSuggestNotes, enabled = canSummarise) { Text("Suggest memory notes") }
+                Text(
+                    "The model reads what you said and offers facts about you worth remembering in every chat. You choose which to keep.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -20,7 +20,33 @@ data class StoredMessage(
     /** Earlier versions of this reply (from regenerating), and where the shown one sits among all of them. */
     val others: List<Reply> = emptyList(),
     val position: Int = 0,
-)
+    /** True if the user starred this message to find it again. */
+    val starred: Boolean = false,
+    /** Photos after the first one ([imagePath]), when a message carries several. */
+    val moreImages: List<String> = emptyList(),
+) {
+    /** Every photo sent with this message, in order. */
+    val images: List<String> get() = listOfNotNull(imagePath) + moreImages
+}
+
+/**
+ * Reading and rewriting the photos of a stored message. The first photo is kept under "image", as before, and any
+ * others under "moreImages", so a chat with one photo is stored exactly as it always was.
+ */
+object MessageImages {
+    fun paths(message: JSONObject): List<String> {
+        val first = message.optString("image").takeIf { it.isNotEmpty() }
+        val more = message.optJSONArray("moreImages")
+        return listOfNotNull(first) + List(more?.length() ?: 0) { more!!.optString(it) }.filter { it.isNotEmpty() }
+    }
+
+    /** Replaces each photo path with [transform]'s answer; a photo it answers null for is dropped. */
+    fun rewrite(message: JSONObject, transform: (String) -> String?) {
+        val kept = paths(message).mapNotNull(transform)
+        if (kept.isEmpty()) message.remove("image") else message.put("image", kept.first())
+        if (kept.size > 1) message.put("moreImages", JSONArray(kept.drop(1))) else message.remove("moreImages")
+    }
+}
 
 data class SavedChat(
     val id: String,
@@ -38,6 +64,12 @@ data class SavedChat(
     val jsonMode: Boolean = false,
     /** A JSON Schema the replies in this chat must follow, or null. */
     val jsonSchema: String? = null,
+    /** Labels the user gave this chat, used to filter History. See [ChatTags]. */
+    val tags: List<String> = emptyList(),
+    /** False when the user switched off the thinking section of a reasoning model for this chat. */
+    val thinking: Boolean = true,
+    /** Whether this chat searches the user's notes folder; null follows the app-wide choice at the time. */
+    val useNotes: Boolean? = null,
 )
 
 /** Saves each conversation as a small JSON file in the app's private storage. */
@@ -49,57 +81,71 @@ class ChatStore(private val context: Context) {
     suspend fun list(): List<SavedChat> = withContext(Dispatchers.IO) {
         dir.listFiles { f -> f.isFile && f.extension == "json" }
             .orEmpty()
-            .mapNotNull { runCatching { parse(it.readText()) }.getOrNull() }
+            .mapNotNull { runCatching { ChatCodec.decode(it.readText()) }.getOrNull() }
             .sortedByDescending { it.updatedAt }
     }
 
-    suspend fun save(chat: SavedChat) = withContext(Dispatchers.IO) {
-        val json = JSONObject()
-            .put("id", chat.id)
-            .put("title", chat.title)
-            .put("updatedAt", chat.updatedAt)
-            .put("modelFile", chat.modelFile ?: JSONObject.NULL)
-            .put("pinned", chat.pinned)
-            .put("customTitle", chat.customTitle)
-            .put("presetId", chat.presetId ?: JSONObject.NULL)
-            .put("jsonMode", chat.jsonMode)
-            .put("jsonSchema", chat.jsonSchema ?: JSONObject.NULL)
-            .put(
-                "attachments",
-                JSONArray(chat.attachments.map {
-                    JSONObject().put("id", it.id).put("name", it.name).put("chars", it.chars)
-                }),
-            )
-            .put(
-                "messages",
-                JSONArray(chat.messages.map { m ->
-                    JSONObject().put("text", m.text).put("isUser", m.isUser).apply {
-                        m.imagePath?.let { put("image", it) }
-                        putStats(this, m.stats)
-                        if (m.summary) put("summary", true)
-                        if (m.others.isNotEmpty()) {
-                            put("others", JSONArray(m.others.map { r ->
-                                JSONObject().put("text", r.text).also { putStats(it, r.stats) }
-                            }))
-                            put("position", m.position)
-                        }
-                    }
-                }),
-            )
+    suspend fun save(chat: SavedChat) = withContext(Dispatchers.IO) { saveNow(chat) }
+
+    /** The same as [save] for code that already runs off the main thread. */
+    fun saveNow(chat: SavedChat) {
         val target = File(dir, "${chat.id}.json")
         val tmp = File(dir, "${chat.id}.json.tmp")
-        tmp.writeText(json.toString())
+        tmp.writeText(ChatCodec.encode(chat).toString())
         tmp.renameTo(target)
     }
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
         File(dir, "$id.json").delete()
     }
+}
 
-    private fun parse(text: String): SavedChat {
+/** Turns a chat into the JSON kept on disk (and synced), and back. Pure, so it can be tested. */
+object ChatCodec {
+
+    fun encode(chat: SavedChat): JSONObject = JSONObject()
+        .put("id", chat.id)
+        .put("title", chat.title)
+        .put("updatedAt", chat.updatedAt)
+        .put("modelFile", chat.modelFile ?: JSONObject.NULL)
+        .put("pinned", chat.pinned)
+        .put("customTitle", chat.customTitle)
+        .put("presetId", chat.presetId ?: JSONObject.NULL)
+        .put("jsonMode", chat.jsonMode)
+        .put("jsonSchema", chat.jsonSchema ?: JSONObject.NULL)
+        .apply { if (chat.tags.isNotEmpty()) put("tags", JSONArray(chat.tags)) }
+        .apply { if (!chat.thinking) put("thinking", false) }
+        .apply { chat.useNotes?.let { put("useNotes", it) } }
+        .put(
+            "attachments",
+            JSONArray(chat.attachments.map {
+                JSONObject().put("id", it.id).put("name", it.name).put("chars", it.chars)
+            }),
+        )
+        .put(
+            "messages",
+            JSONArray(chat.messages.map { m ->
+                JSONObject().put("text", m.text).put("isUser", m.isUser).apply {
+                    m.imagePath?.let { put("image", it) }
+                    if (m.moreImages.isNotEmpty()) put("moreImages", JSONArray(m.moreImages))
+                    putStats(this, m.stats)
+                    if (m.summary) put("summary", true)
+                    if (m.starred) put("starred", true)
+                    if (m.others.isNotEmpty()) {
+                        put("others", JSONArray(m.others.map { r ->
+                            JSONObject().put("text", r.text).also { putStats(it, r.stats) }
+                        }))
+                        put("position", m.position)
+                    }
+                }
+            }),
+        )
+
+    fun decode(text: String): SavedChat {
         val o = JSONObject(text)
         val arr = o.getJSONArray("messages")
         val att = o.optJSONArray("attachments")
+        val tagList = o.optJSONArray("tags")
         return SavedChat(
             id = o.getString("id"),
             title = o.getString("title"),
@@ -110,6 +156,9 @@ class ChatStore(private val context: Context) {
             presetId = if (o.isNull("presetId")) null else o.optString("presetId").ifEmpty { null },
             jsonMode = o.optBoolean("jsonMode", false),
             jsonSchema = if (o.isNull("jsonSchema")) null else o.optString("jsonSchema").ifEmpty { null },
+            tags = ChatTags.clean(List(tagList?.length() ?: 0) { tagList!!.optString(it) }),
+            thinking = o.optBoolean("thinking", true),
+            useNotes = if (o.has("useNotes")) o.optBoolean("useNotes") else null,
             attachments = List(att?.length() ?: 0) {
                 val a = att!!.getJSONObject(it)
                 Attachment(a.getString("id"), a.getString("name"), a.optInt("chars"))
@@ -128,6 +177,8 @@ class ChatStore(private val context: Context) {
                         Reply(r.getString("text"), readStats(r))
                     },
                     position = m.optInt("position", 0),
+                    starred = m.optBoolean("starred", false),
+                    moreImages = MessageImages.paths(m).drop(1),
                 )
             },
         )

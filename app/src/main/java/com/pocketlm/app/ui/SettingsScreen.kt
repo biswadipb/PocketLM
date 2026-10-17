@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,10 +51,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.arm.aichat.GenerationParams
+import com.pocketlm.app.data.DisplayScale
 import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.Preset
 import java.util.UUID
 import com.pocketlm.app.data.MemoryNotes
+import com.pocketlm.app.data.OcrScript
+import com.pocketlm.app.data.SearchProvider
 import com.pocketlm.app.data.Note
 import com.pocketlm.app.PocketAssist
 import androidx.compose.ui.platform.LocalContext
@@ -80,7 +84,11 @@ fun SettingsScreen(
     val idleMinutes by vm.idleMinutes.collectAsStateWithLifecycle()
     val maxReply by vm.maxReplyTokens.collectAsStateWithLifecycle()
     val searchServer by vm.searchServer.collectAsStateWithLifecycle()
+    val searchProvider by vm.searchProvider.collectAsStateWithLifecycle()
+    val braveKey by vm.braveKey.collectAsStateWithLifecycle()
     val notes by vm.notes.collectAsStateWithLifecycle()
+    val ocrScript by vm.ocrScript.collectAsStateWithLifecycle()
+    val ocrStatus by vm.ocrStatus.collectAsStateWithLifecycle()
     val saveStates by vm.saveStates.collectAsStateWithLifecycle()
     var editingNote by remember { mutableStateOf<Note?>(null) }
     var addingNote by remember { mutableStateOf(false) }
@@ -88,6 +96,8 @@ fun SettingsScreen(
     val apiEnabled by vm.apiEnabled.collectAsStateWithLifecycle()
     val apiStatus by vm.apiStatus.collectAsStateWithLifecycle()
     val apiPort by vm.apiPort.collectAsStateWithLifecycle()
+    val apiHttps by vm.apiHttps.collectAsStateWithLifecycle()
+    val apiCertificate by vm.apiCertificate.collectAsStateWithLifecycle()
     val apiKey by vm.apiKey.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val presets by vm.presets.collectAsStateWithLifecycle()
@@ -145,6 +155,24 @@ fun SettingsScreen(
                 }
             }
 
+            val textScale by vm.textScale.collectAsStateWithLifecycle()
+            Text("Text size", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.bodyLarge)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = textScale,
+                    onValueChange = vm::setTextScale,
+                    valueRange = DisplayScale.MIN_TEXT..DisplayScale.MAX_TEXT,
+                    steps = Math.round((DisplayScale.MAX_TEXT - DisplayScale.MIN_TEXT) / DisplayScale.STEP) - 1,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(DisplayScale.label(textScale), Modifier.padding(start = 12.dp), color = MaterialTheme.colorScheme.primary)
+            }
+            Text(
+                "Makes the text in PocketLM bigger or smaller, on top of the size set in your phone's settings.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             SectionTitle("Local API server", Modifier.padding(top = 24.dp))
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -164,7 +192,7 @@ fun SettingsScreen(
                         val addresses = remember(status) { LocalNetwork.addresses() }
                         Text(
                             if (addresses.isEmpty()) "Running on port ${status.port}, but no Wi-Fi address was found."
-                            else "Running. Base URL:\n" + addresses.joinToString("\n") { "http://$it:${status.port}/v1" },
+                            else "Running. Base URL:\n" + addresses.joinToString("\n") { "${if (status.https) "https" else "http"}://$it:${status.port}/v1" },
                             Modifier.padding(top = 8.dp),
                             color = MaterialTheme.colorScheme.primary,
                             style = MaterialTheme.typography.bodyMedium,
@@ -197,9 +225,44 @@ fun SettingsScreen(
                         enabled = portText != apiPort.toString() && portText.isNotEmpty(),
                     ) { Text("Apply") }
                 }
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Use HTTPS")
+                        Text(
+                            "Encrypts the connection with a certificate this phone makes for itself.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = apiHttps, onCheckedChange = vm::setApiHttps)
+                }
+                if (apiHttps) {
+                    LaunchedEffect(Unit) { vm.refreshApiCertificate() }
+                    apiCertificate?.let { cert ->
+                        Text("Certificate fingerprint (SHA-256)", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.labelLarge)
+                        Text(cert.fingerprint, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                        Row {
+                            TextButton(onClick = { clipboard.setText(AnnotatedString(cert.fingerprint)) }) { Text("Copy fingerprint") }
+                            TextButton(onClick = { clipboard.setText(AnnotatedString(cert.pem)) }) { Text("Copy certificate") }
+                            TextButton(onClick = vm::resetApiCertificate) { Text("New certificate") }
+                        }
+                    }
+                    Text(
+                        "Apps that call the server must trust this certificate: save the copied text as a .crt file and give it " +
+                            "to the app (curl: --cacert), or compare the fingerprint. Because the phone makes the certificate itself, " +
+                            "browsers and most apps warn about it until you do. It names the addresses this phone has had on your " +
+                            "networks, so a new network means a new certificate.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text(
-                    "Send the key as an Authorization: Bearer header. Anyone on your network who has the key can use " +
-                        "your model, and the connection is not encrypted, so only use it on a network you trust.",
+                    if (apiHttps) {
+                        "Send the key as an Authorization: Bearer header. Anyone on your network who has the key can use your model."
+                    } else {
+                        "Send the key as an Authorization: Bearer header. Anyone on your network who has the key can use " +
+                            "your model, and the connection is not encrypted, so only use it on a network you trust."
+                    },
                     Modifier.padding(top = 8.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -224,7 +287,46 @@ fun SettingsScreen(
                 TextButton(onClick = { backupPicker.launch(arrayOf("application/zip", "application/octet-stream")) }) { Text("Restore") }
             }
 
+            Text(
+                "Bring your old chats along from ChatGPT (Settings, Data controls, Export data) or Claude (Settings, Privacy, " +
+                    "Export data). Choose the .zip you were sent, or the conversations.json inside it. Only the text is imported, " +
+                    "and the chats are tagged so you can find them.",
+                Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            val importProgress by vm.importProgress.collectAsStateWithLifecycle()
+            val importPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                uri?.let(vm::importChats)
+            }
+            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = { importPicker.launch(arrayOf("application/zip", "application/json", "application/octet-stream", "text/plain")) },
+                    enabled = importProgress == null,
+                ) { Text("Import from ChatGPT or Claude") }
+                importProgress?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+            }
+
             SyncSection(vm)
+
+            DocumentSearchSection(vm)
+            NotesFolderSection(vm)
+
+            SectionTitle("Heat and battery", Modifier.padding(top = 24.dp))
+            val autoThrottle by vm.autoThrottle.collectAsStateWithLifecycle()
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Slow down when the phone is hot or low on battery")
+                    Text(
+                        "Uses fewer processor threads and shortens replies while the phone is warm or the battery is low and not " +
+                            "charging, then goes back to normal. The context length is not changed, as that needs the model to " +
+                            "load again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = autoThrottle, onCheckedChange = vm::setAutoThrottle)
+            }
 
             SectionTitle("Memory", Modifier.padding(top = 24.dp))
             Text(
@@ -278,6 +380,36 @@ fun SettingsScreen(
             }
             TextButton(onClick = { addingNote = true }) { Text("Add a note") }
 
+            SectionTitle("Text recognition", Modifier.padding(top = 24.dp))
+            Text(
+                "Scanned PDFs and photos are read as text on your phone. Pick the writing system your documents use. " +
+                    "Its language data (a few MB) is downloaded once through Google Play services the first time it is " +
+                    "needed, and works offline after that. Cyrillic, Arabic, Greek, Hebrew and Thai are not supported yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(Modifier.selectableGroup().padding(top = 4.dp)) {
+                OcrScript.entries.forEach { script ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .selectable(selected = script == ocrScript, onClick = { vm.setOcrScript(script) }, role = Role.RadioButton)
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = script == ocrScript, onClick = null)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(script.label)
+                            Text(script.covers, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            TextButton(onClick = vm::downloadOcrLanguage) { Text("Download ${ocrScript.label} now") }
+            ocrStatus?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+
             SectionTitle("Model tools", Modifier.padding(top = 24.dp))
             Text(
                 "Let the model use helpers while it answers. Applies the next time a model loads or you start a new chat. " +
@@ -296,15 +428,50 @@ fun SettingsScreen(
             }
 
             if (ToolId.WebSearch in enabledTools) {
-                OutlinedTextField(
-                    value = searchServer,
-                    onValueChange = vm::setSearchServer,
-                    label = { Text("Search server address") },
-                    placeholder = { Text("search.example.org") },
-                    supportingText = { Text("A SearXNG server that allows JSON results, ideally your own. The model's search words are sent to it.") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                Text("Search with", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelLarge)
+                Column(Modifier.selectableGroup()) {
+                    SearchProvider.entries.forEach { provider ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .selectable(selected = provider == searchProvider, onClick = { vm.setSearchProvider(provider) }, role = Role.RadioButton)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = provider == searchProvider, onClick = null)
+                            Column(Modifier.padding(start = 12.dp)) {
+                                Text(provider.label)
+                                Text(provider.blurb, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+                when (searchProvider) {
+                    SearchProvider.DuckDuckGo -> Unit
+                    SearchProvider.Brave -> OutlinedTextField(
+                        value = braveKey,
+                        onValueChange = vm::setBraveKey,
+                        label = { Text("Brave Search API key") },
+                        supportingText = { Text("Stays on this phone: it is not included in backups or sync.") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    SearchProvider.SearXNG -> OutlinedTextField(
+                        value = searchServer,
+                        onValueChange = vm::setSearchServer,
+                        label = { Text("Search server address") },
+                        placeholder = { Text("search.example.org") },
+                        supportingText = { Text("A SearXNG server that allows JSON results, ideally your own.") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                }
+                Text(
+                    "The words the model searches for are sent to ${searchProvider.label}.",
+                    Modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 

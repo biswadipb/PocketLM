@@ -38,9 +38,15 @@ enum class HubSource(val label: String) {
     Mirror("Custom address"),
 }
 
+/** One page of search results. [next] is what to pass to ask for the following page, or null when this was the last. */
+data class SearchPage(val results: List<HfModel>, val next: String? = null)
+
 /** A model repository with search, a file listing, and direct download links. */
 interface ModelHub {
     suspend fun search(query: String): List<HfModel>
+
+    /** One page of results. Hubs that return everything in one go ignore [cursor] and have no next page. */
+    suspend fun searchPage(query: String, cursor: String? = null): SearchPage = SearchPage(search(query))
 
     /** The single-file GGUF models (and vision add-ons) in a repository, smallest first. */
     suspend fun files(repoId: String): List<HfFile>
@@ -191,9 +197,13 @@ class ModelScopeHub : ModelHub {
  */
 class KaggleHub : ModelHub {
 
-    override suspend fun search(query: String): List<HfModel> = withContext(Dispatchers.IO) {
+    override suspend fun search(query: String): List<HfModel> = searchPage(query).results
+
+    override suspend fun searchPage(query: String, cursor: String?): SearchPage = withContext(Dispatchers.IO) {
         val q = query.trim().let { if (it.contains("gguf", ignoreCase = true)) it else "$it gguf" }
-        parseSearch(Http.request("$BASE/api/v1/models/list?search=${URLEncoder.encode(q, "UTF-8")}&pageSize=40"))
+        val page = cursor?.let { "&pageToken=" + URLEncoder.encode(it, "UTF-8") }.orEmpty()
+        val json = Http.request("$BASE/api/v1/models/list?search=${URLEncoder.encode(q, "UTF-8")}&pageSize=40$page")
+        SearchPage(parseSearch(json), parseNextToken(json))
     }
 
     override suspend fun files(repoId: String): List<HfFile> = withContext(Dispatchers.IO) {
@@ -211,7 +221,11 @@ class KaggleHub : ModelHub {
 
     companion object {
         private const val BASE = "https://www.kaggle.com"
-        private const val MAX_RESULTS = 40
+        private const val MAX_RESULTS = 160
+
+        /** The token that asks for the next page, or null on the last one. */
+        fun parseNextToken(json: String): String? =
+            runCatching { JSONObject(json).optString("nextPageToken") }.getOrNull()?.takeIf { it.isNotEmpty() }
 
         fun parseId(id: String): Id {
             val parts = id.split('/')

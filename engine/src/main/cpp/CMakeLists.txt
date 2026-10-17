@@ -36,7 +36,8 @@ add_subdirectory(${LLAMA_SRC} build-llama)
 add_subdirectory(${LLAMA_SRC}/tools/mtmd build-mtmd)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        ai_chat.cpp)
+        ai_chat.cpp
+        embedder.cpp)
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         GGML_SYSTEM_ARCH=${GGML_SYSTEM_ARCH}

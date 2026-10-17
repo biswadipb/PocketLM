@@ -14,10 +14,28 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
+import com.arm.aichat.EmbeddingException
 import com.arm.aichat.GenerationParams
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.LoraAdapter
 import com.arm.aichat.isModelLoaded
 import com.pocketlm.app.data.AppLog
+import com.pocketlm.app.data.ChatImporter
+import com.pocketlm.app.data.AdapterStore
+import com.pocketlm.app.data.ChatTags
+import com.pocketlm.app.data.DisplayScale
+import com.pocketlm.app.data.IncognitoLedger
+import com.pocketlm.app.data.KnowledgeStore
+import com.pocketlm.app.data.NotesRules
+import com.pocketlm.app.data.NotesScanner
+import com.pocketlm.app.data.NoteSuggestions
+import com.pocketlm.app.data.ShareIntake
+import com.pocketlm.app.data.LocalAdapter
+import com.pocketlm.app.data.LoraAdapterInfo
+import com.pocketlm.app.data.LoraCheck
+import com.pocketlm.app.data.SpeechText
+import com.pocketlm.app.data.ThrottleLevel
+import com.pocketlm.app.data.ThrottlePolicy
 import com.pocketlm.app.data.ChatTemplates
 import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.Attachment
@@ -33,31 +51,37 @@ import com.pocketlm.app.data.PromptRecord
 import com.pocketlm.app.data.PromptStep
 import com.pocketlm.app.data.Replay
 import com.pocketlm.app.data.Reply
-import com.pocketlm.app.data.SettingsSync
+import com.pocketlm.app.data.SettingKeys
+import com.pocketlm.app.data.SyncListener
+import com.pocketlm.app.data.SyncOutcome
+import com.pocketlm.app.data.SyncRunner
 import com.pocketlm.app.data.StatePolicy
 import com.pocketlm.app.data.FolderBackend
-import com.pocketlm.app.data.SyncConfigStore
 import com.pocketlm.app.data.SyncCrypto
-import com.pocketlm.app.data.SyncEngine
 import com.pocketlm.app.data.SyncException
 import com.pocketlm.app.data.SyncHeader
 import com.pocketlm.app.data.SyncKind
 import com.pocketlm.app.data.SyncNames
-import com.pocketlm.app.data.SyncOptions
-import com.pocketlm.app.data.SyncSettings
 import com.pocketlm.app.data.SyncState
-import com.pocketlm.app.data.SyncStateStore
 import com.pocketlm.app.data.SyncStatus
 import com.pocketlm.app.data.SyncTarget
 import com.pocketlm.app.data.checkAccess
 import com.pocketlm.app.data.Summaries
 import com.pocketlm.app.data.Turn
 import com.pocketlm.app.data.Variants
+import com.pocketlm.app.data.VoiceListener
+import com.pocketlm.app.data.VoiceLoop
 import com.pocketlm.app.data.WebPage
 import com.pocketlm.app.data.BackupManager
 import com.arm.aichat.ContextUsage
 import com.pocketlm.app.data.ApiBackend
+import com.pocketlm.app.data.Chunker
+import com.pocketlm.app.data.DocumentSearch
+import com.pocketlm.app.data.EmbeddingFile
+import com.pocketlm.app.data.EmbeddingModels
+import com.pocketlm.app.data.EmbeddingsResult
 import com.pocketlm.app.data.ApiException
+import com.pocketlm.app.data.ApiTools
 import com.pocketlm.app.data.BenchResult
 import com.pocketlm.app.data.ChatRequest
 import com.pocketlm.app.data.Bm25Index
@@ -89,12 +113,19 @@ import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.Ocr
+import com.pocketlm.app.data.SearchConfig
+import com.pocketlm.app.data.SearchProvider
+import com.pocketlm.app.data.SelfSignedCertificate
+import com.pocketlm.app.data.TlsStore
+import com.pocketlm.app.data.LocalNetwork
+import com.pocketlm.app.data.OcrScript
 import com.pocketlm.app.data.Presets
 import com.pocketlm.app.data.PromptLibrary
 import com.pocketlm.app.data.SavedPrompt
 import com.pocketlm.app.data.Speaker
 import com.pocketlm.app.ui.ThemeMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -104,11 +135,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
@@ -129,14 +163,26 @@ data class ChatMessage(
     /** Earlier versions of this reply (from regenerating), and where the shown one sits among all of them. */
     val others: List<Reply> = emptyList(),
     val position: Int = 0,
-)
+    val starred: Boolean = false,
+    /** Photos after the first one, when a message carries several. */
+    val moreImages: List<String> = emptyList(),
+) {
+    /** Every photo sent with this message, in order. */
+    val images: List<String> get() = listOfNotNull(imagePath) + moreImages
+}
 
 data class SearchState(
     val query: String = "",
     val loading: Boolean = false,
     val searched: Boolean = false,
     val results: List<HfModel> = emptyList(),
+    /** What to ask for to get the next page of results, or null when there are no more. */
+    val next: String? = null,
+    val loadingMore: Boolean = false,
 )
+
+/** The HTTPS certificate of the API server: its SHA-256 [fingerprint], the certificate as [pem] text, and when it expires. */
+data class ApiCertificate(val fingerprint: String, val pem: String, val expiresMs: Long)
 
 /** Files of one repository: null [files] while still loading. */
 data class RepoFiles(val files: List<HfFile>? = null, val error: String? = null)
@@ -196,6 +242,17 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString(KEY_THEME, mode.name).apply()
     }
 
+    private val _textScale = MutableStateFlow(DisplayScale.snapText(prefs.getFloat(KEY_TEXT_SCALE, 1f)))
+
+    /** How much bigger or smaller than the phone's own setting the app's text is shown. */
+    val textScale = _textScale.asStateFlow()
+
+    fun setTextScale(scale: Float) {
+        val snapped = DisplayScale.snapText(scale)
+        _textScale.value = snapped
+        prefs.edit().putFloat(KEY_TEXT_SCALE, snapped).apply()
+    }
+
     private val _generationParams = MutableStateFlow(
         GenerationParams(
             contextSize = prefs.getInt(KEY_CTX, DEFAULT_PARAMS.contextSize),
@@ -206,6 +263,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             minP = prefs.getFloat(KEY_MIN_P, DEFAULT_PARAMS.minP),
             repeatPenalty = prefs.getFloat(KEY_REPEAT, DEFAULT_PARAMS.repeatPenalty),
             seed = prefs.getInt(KEY_SEED, DEFAULT_PARAMS.seed),
+            cacheBits = prefs.getInt(KEY_CACHE_BITS, DEFAULT_PARAMS.cacheBits),
         )
     )
     val generationParams = _generationParams.asStateFlow()
@@ -222,6 +280,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             .putFloat(KEY_MIN_P, params.minP)
             .putFloat(KEY_REPEAT, params.repeatPenalty)
             .putInt(KEY_SEED, params.seed)
+            .putInt(KEY_CACHE_BITS, params.cacheBits)
             .apply()
     }
 
@@ -238,8 +297,47 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val draft = own?.draftFile?.takeIf { it != model.fileName }
             ?.let { name -> _models.value.firstOrNull { it.fileName == name }?.path }
             .orEmpty()
+        val adapters = own?.adapters.orEmpty().mapNotNull { a ->
+            adapterStore.file(a.file)?.let { LoraAdapter(it.absolutePath, a.scale) }
+        }
         return (own?.params ?: _generationParams.value)
-            .copy(chatTemplate = own?.chatTemplate.orEmpty(), draftModelPath = draft)
+            .copy(chatTemplate = own?.chatTemplate.orEmpty(), draftModelPath = draft, adapters = adapters)
+    }
+
+    private val adapterStore = AdapterStore(app)
+
+    /** The adapter files in the app's storage, for choosing from in a model's settings. */
+    private val _adapters = MutableStateFlow<List<LocalAdapter>>(emptyList())
+    val adapters = _adapters.asStateFlow()
+
+    private fun refreshAdapters() {
+        viewModelScope.launch { _adapters.value = adapterStore.list() }
+    }
+
+    /**
+     * Copies an adapter file into the app for [model]. [onDone] gets its file name, or the reason it cannot be used.
+     */
+    fun importAdapter(uri: Uri, model: LocalModel, onDone: (name: String?, problem: String?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val architecture = ModelInfo.read(model.path)?.architecture
+                val name = adapterStore.import(uri, architecture)
+                refreshAdapters()
+                onDone(name, null)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                onDone(null, e.message ?: "That file could not be used.")
+            }
+        }
+    }
+
+    /** Deletes adapter files that no model uses any more. */
+    private fun pruneAdapters() {
+        val inUse = _modelSettings.value.values.flatMap { it.adapters }.map { it.file }.toSet()
+        viewModelScope.launch {
+            adapterStore.prune(inUse)
+            _adapters.value = adapterStore.list()
+        }
     }
 
     /** The context length that will be used for [model], for the memory estimate. */
@@ -253,6 +351,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val presetBefore = presetOf(model)
         _modelSettings.update { map -> if (settings == null) map - model.fileName else map + (model.fileName to settings) }
         prefs.edit().putString(KEY_MODEL_SETTINGS, ModelSettingsStore.toJson(_modelSettings.value)).apply()
+        pruneAdapters()
         if (_loadedModel.value?.fileName != model.fileName || _sleeping.value) return
 
         val after = paramsFor(model)
@@ -345,12 +444,16 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         return ChatState.tag(
             ChatState.modelId(model.fileName, file.length(), file.lastModified()),
             params.contextSize, params.chatTemplate, chatSystemPrompt, history,
+            LoraCheck.signature(params.adapters.map { a ->
+                File(a.path).let { f -> LoraAdapterInfo(f.name, f.length(), f.lastModified(), a.scale) }
+            }),
+            params.cacheBits,
         )
     }
 
     /** Saves what the model remembers of the open chat, once a reply is finished. */
     private fun saveChatState() {
-        if (!_saveStates.value) return
+        if (!_saveStates.value || _incognito.value) return
         val id = currentChatId ?: return
         val model = _loadedModel.value ?: return
         val history = turns()
@@ -570,6 +673,35 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         power.addThermalStatusListener(thermalListener)
     }
 
+    private val _autoThrottle = MutableStateFlow(prefs.getBoolean(KEY_AUTO_THROTTLE, true))
+
+    /** Whether the model is held back (fewer threads, shorter replies) when the phone is hot or low on battery. */
+    val autoThrottle = _autoThrottle.asStateFlow()
+
+    fun setAutoThrottle(on: Boolean) {
+        _autoThrottle.value = on
+        prefs.edit().putBoolean(KEY_AUTO_THROTTLE, on).apply()
+    }
+
+    private val _throttle = MutableStateFlow(ThrottleLevel.None)
+
+    /** How far the model is being held back right now. */
+    val throttle = _throttle.asStateFlow()
+
+    /** Applies the throttle whenever the phone's heat or battery, or the setting, changes. */
+    private fun watchThrottle() {
+        viewModelScope.launch {
+            combine(_deviceStatus, _autoThrottle) { status, on -> status to on }.collect { (status, on) ->
+                val level = if (on) ThrottlePolicy.level(status, _throttle.value) else ThrottleLevel.None
+                if (level != _throttle.value) {
+                    _throttle.value = level
+                    runCatching { engine.setThreadShare(ThrottlePolicy.threadPercent(level)) }
+                    AppLog.note("Throttle: $level (thermal ${status.thermal}, battery ${status.batteryPercent}%, charging ${status.charging})")
+                }
+            }
+        }
+    }
+
     private fun stopDeviceMonitoring() {
         val app = getApplication<Application>()
         runCatching { app.unregisterReceiver(batteryReceiver) }
@@ -588,8 +720,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun referencedFiles(): Pair<Set<String>, Set<String>> {
         val chats = chatStore.list().also { _chats.value = it }
-        val images = (chats.flatMap { c -> c.messages.mapNotNull { it.imagePath } } +
-            _messages.value.mapNotNull { it.imagePath } + listOfNotNull(_pendingImage.value)).toSet()
+        val images = (chats.flatMap { c -> c.messages.flatMap { it.images } } +
+            _messages.value.flatMap { it.images } + _pendingImages.value).toSet()
         val documents = (chats.flatMap { c -> c.attachments.map { it.id } } + _attachments.value.map { it.id }).toSet()
         return images to documents
     }
@@ -617,7 +749,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 rememberDeletion(chat)
                 chatStore.delete(chat.id)
                 chat.attachments.forEach { docStore.delete(it.id) }
-                chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
+                chat.messages.flatMap { it.images }.forEach { imageStore.delete(it) }
             }
             stateCache.clear()
             clearConversation()
@@ -676,6 +808,57 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (on) ApiService.start(getApplication()) else ApiService.stop(getApplication())
     }
 
+    private val _apiHttps = MutableStateFlow(prefs.getBoolean(ApiService.KEY_HTTPS, false))
+
+    /** Whether the API server uses HTTPS, with a certificate this phone makes for itself. */
+    val apiHttps = _apiHttps.asStateFlow()
+
+    private val tlsStore = TlsStore(File(app.filesDir, ApiService.TLS_DIR))
+
+    private val _apiCertificate = MutableStateFlow<ApiCertificate?>(null)
+
+    /** The certificate the HTTPS server uses, for checking or handing to the apps that call it. */
+    val apiCertificate = _apiCertificate.asStateFlow()
+
+    fun setApiHttps(on: Boolean) {
+        _apiHttps.value = on
+        prefs.edit().putBoolean(ApiService.KEY_HTTPS, on).apply()
+        if (on) refreshApiCertificate() else _apiCertificate.value = null
+        restartApiIfOn()
+    }
+
+    /** Reads (making it first, if needed) the certificate the server will use. */
+    fun refreshApiCertificate() {
+        if (!_apiHttps.value) return
+        viewModelScope.launch {
+            _apiCertificate.value = try {
+                withContext(Dispatchers.IO) {
+                    val certificate = tlsStore.identity(LocalNetwork.addresses()).certificate
+                    ApiCertificate(SelfSignedCertificate.fingerprint(certificate), SelfSignedCertificate.pem(certificate), certificate.notAfter.time)
+                }
+            } catch (e: Exception) {
+                _error.value = "Could not make the HTTPS certificate: ${e.message}"
+                null
+            }
+        }
+    }
+
+    /** Makes a new certificate. Apps that trusted the old one have to be given the new one. */
+    fun resetApiCertificate() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { tlsStore.delete() }
+            refreshApiCertificate()
+            restartApiIfOn()
+        }
+    }
+
+    private fun restartApiIfOn() {
+        if (_apiEnabled.value) {
+            ApiService.stop(getApplication())
+            ApiService.start(getApplication())
+        }
+    }
+
     fun setApiPort(port: Int) {
         if (port !in 1024..65535) {
             _error.value = "Pick a port between 1024 and 65535."
@@ -696,8 +879,23 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private val apiBackend = object : ApiBackend {
-        override fun modelNames() = listOfNotNull(_loadedModel.value?.fileName?.removeSuffix(".gguf"))
+        override fun modelNames() = listOfNotNull(
+            _loadedModel.value?.fileName?.removeSuffix(".gguf"),
+            selectedEmbeddingModel()?.fileName?.removeSuffix(".gguf"),
+        )
         override suspend fun complete(request: ChatRequest, onToken: (String) -> Unit) = serveApiRequest(request, onToken)
+
+        override suspend fun embed(inputs: List<String>): EmbeddingsResult {
+            val model = selectedEmbeddingModel()
+                ?: throw ApiException(503, "No embedding model is selected. Choose one in PocketLM, Settings, Document search.")
+            return try {
+                ensureEmbedder(model)
+                val vectors = inputs.map { embedder.embed(it) }
+                EmbeddingsResult(vectors, model.fileName.removeSuffix(".gguf"), inputs.sumOf { embedder.countTokens(it).coerceAtLeast(0) })
+            } catch (e: EmbeddingException) {
+                throw ApiException(503, e.message ?: "The embedding model could not be used.")
+            }
+        }
     }
 
     private suspend fun awaitModelReady() {
@@ -722,12 +920,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         var changedSampling = false
         try {
             if (!wakeIfAsleep(restore = false)) throw ApiException(503, "The model could not be loaded again.")
-            val system = request.messages.firstOrNull { it.role == "system" }?.content?.takeIf { it.isNotBlank() } ?: selectedPrompt
-            val turns = request.messages.filter { it.role != "system" }
-            val lastUser = turns.indexOfLast { it.role == "user" }
-            val question = turns[lastUser].content
+            val baseSystem = request.messages.firstOrNull { it.role == "system" }?.content?.takeIf { it.isNotBlank() } ?: selectedPrompt
+            // Functions the caller describes are explained to the model in its instructions.
+            val system = if (request.usesTools) baseSystem.trimEnd() + "\n\n" + ApiTools.systemBlock(request.tools, request.toolChoice) else baseSystem
+            val conversation = ApiTools.conversation(request.messages)
+            val question = conversation.question
             if (question.isBlank()) throw ApiException(400, "The last user message is empty.")
-            val earlier = Replay.build(turns.take(lastUser).map { Turn(it.role == "user", it.content) })
+            val earlier = Replay.build(conversation.earlier)
             val prompt = if (earlier == null) question
             else "Here is our earlier conversation:\n$earlier\n\nContinue from there. My new message: $question"
 
@@ -774,9 +973,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The settings that travel in a backup. Secrets (API key, app lock) and per-phone choices are left out. */
     private val backupKeys = setOf(
-        KEY_THEME, KEY_CTX, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
+        KEY_THEME, KEY_TEXT_SCALE, KEY_CTX, KEY_CACHE_BITS, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
         KEY_STOP, KEY_PRESETS, KEY_PRESET_ID, KEY_PROMPTS, KEY_TOOLS, KEY_BG_REPLIES, KEY_READ_ALOUD, KEY_IDLE_MINUTES,
-        KEY_MAX_REPLY, KEY_MODEL_SETTINGS, KEY_NOTES, KEY_SAVE_STATES,
+        KEY_MAX_REPLY, KEY_MODEL_SETTINGS, KEY_NOTES, KEY_SAVE_STATES, KEY_OCR_SCRIPT,
     )
 
     private fun backupManager(): BackupManager {
@@ -840,6 +1039,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Reads every backed-up setting from preferences again, after a restore changed them. */
     private fun reloadSettings() {
         _themeMode.value = ThemeMode.entries.firstOrNull { it.name == prefs.getString(KEY_THEME, null) } ?: ThemeMode.System
+        _textScale.value = DisplayScale.snapText(prefs.getFloat(KEY_TEXT_SCALE, 1f))
         _generationParams.value = GenerationParams(
             contextSize = prefs.getInt(KEY_CTX, DEFAULT_PARAMS.contextSize),
             threads = prefs.getInt(KEY_THREADS, DEFAULT_PARAMS.threads),
@@ -849,6 +1049,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             minP = prefs.getFloat(KEY_MIN_P, DEFAULT_PARAMS.minP),
             repeatPenalty = prefs.getFloat(KEY_REPEAT, DEFAULT_PARAMS.repeatPenalty),
             seed = prefs.getInt(KEY_SEED, DEFAULT_PARAMS.seed),
+            cacheBits = prefs.getInt(KEY_CACHE_BITS, DEFAULT_PARAMS.cacheBits),
         )
         _stopWords.value = prefs.getString(KEY_STOP, "") ?: ""
         _customPresets.value = Presets.fromJson(prefs.getString(KEY_PRESETS, null))
@@ -859,6 +1060,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _readAloud.value = prefs.getBoolean(KEY_READ_ALOUD, false)
         _idleMinutes.value = prefs.getInt(KEY_IDLE_MINUTES, 0)
         _maxReplyTokens.value = prefs.getInt(KEY_MAX_REPLY, InferenceEngine.DEFAULT_PREDICT_LENGTH)
+        setOcrScriptInternal(OcrScript.fromId(prefs.getString(KEY_OCR_SCRIPT, null)))
         _modelSettings.value = ModelSettingsStore.fromJson(prefs.getString(KEY_MODEL_SETTINGS, null))
         _notes.value = MemoryNotes.fromJson(prefs.getString(KEY_NOTES, null))
         _saveStates.value = prefs.getBoolean(KEY_SAVE_STATES, true)
@@ -866,19 +1068,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Sync between devices ---------------------------------------------------------
 
-    /**
-     * The settings that sync when the user turns that on: what a person would want on every device. Per-phone choices
-     * (theme, threads, context size, background behaviour), model settings and everything secret (API key, app
-     * lock, hub and search addresses) stay out.
-     */
-    private val syncKeys = setOf(
-        KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED, KEY_STOP, KEY_PRESETS, KEY_PRESET_ID,
-        KEY_PROMPTS, KEY_TOOLS, KEY_READ_ALOUD, KEY_MAX_REPLY, KEY_NOTES, KEY_SAVE_STATES,
-    )
-
-    private val syncConfig = SyncConfigStore(app)
-    private val syncState = SyncStateStore(File(app.filesDir, "sync_state.json"))
-    private val syncMutex = Mutex()
+    private val syncRunner = SyncRunner.get(app)
+    private val syncConfig = syncRunner.config
+    private val syncState = syncRunner.state
     private var syncDebounce: Job? = null
     private var syncAgain = false
 
@@ -889,6 +1081,31 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun publishSyncStatus(running: Boolean = false, progress: String = "", connectError: String? = null) {
         _sync.value = syncConfig.status(syncState.get().lastSyncAt).copy(running = running, progress = progress, connectError = connectError)
+    }
+
+    /** Hears about syncs from the shared runner, including those the background job starts. */
+    private val syncListener = object : SyncListener {
+        override fun onStarted() = publishSyncStatus(running = true, progress = "Starting")
+
+        override fun onProgress(text: String) {
+            _sync.update { it.copy(progress = text) }
+        }
+
+        override fun onFinished(outcome: SyncOutcome) {
+            publishSyncStatus()
+            if (outcome is SyncOutcome.Done && outcome.report.changedHere) refreshChats()
+            if (syncAgain) {
+                syncAgain = false
+                viewModelScope.launch { scheduleSync(SYNC_SOON_MS) }
+            }
+        }
+
+        override fun onSettingsApplied() {
+            reloadSettings()
+        }
+
+        // The chat on screen is never replaced under the user; it updates after they leave it.
+        override fun openChatIds(): Set<String> = setOfNotNull(currentChatId)
     }
 
     /**
@@ -913,7 +1130,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                             ?: throw SyncException("That passphrase does not match the one used for this sync location.")
                         header to key
                     } else {
-                        if (passphrase.length < MIN_PASSPHRASE) throw SyncException("Choose a passphrase of at least $MIN_PASSPHRASE characters.")
+                        if (passphrase.length < SyncRunner.MIN_PASSPHRASE) {
+                            throw SyncException("Choose a passphrase of at least ${SyncRunner.MIN_PASSPHRASE} characters.")
+                        }
                         if (passphrase != repeat) throw SyncException("The two passphrases are not the same.")
                         val (header, key) = SyncCrypto.newHeader(passphrase.toCharArray())
                         backend.put(SyncNames.HEADER, header.toJson().toByteArray())
@@ -926,6 +1145,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 syncConfig.save(named, header, key)
                 // What the old location held says nothing about the new one; deletions made here still apply.
                 syncState.update { SyncState(tombstones = it.tombstones) }
+                syncRunner.updateBackgroundJob()
                 publishSyncStatus()
                 runSync(manual = true)
             } catch (e: Exception) {
@@ -935,10 +1155,37 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Enters the new passphrase after another device changed it, and carries on syncing with the same location. */
+    fun rejoinSync(passphrase: String) {
+        val connection = syncConfig.load()
+        if (connection == null) {
+            publishSyncStatus(connectError = "Sync needs to be set up again on this phone.")
+            return
+        }
+        connectSync(connection.target, passphrase, passphrase)
+    }
+
+    /** Locks the sync location with a new passphrase; other devices are asked for it the next time they sync. */
+    fun changeSyncPassphrase(current: String, new: String, repeat: String) {
+        if (_sync.value.running) return
+        viewModelScope.launch {
+            publishSyncStatus(running = true, progress = "Checking")
+            val outcome = withContext(Dispatchers.IO) { syncRunner.changePassphrase(current, new, repeat) }
+            publishSyncStatus(connectError = (outcome as? SyncOutcome.Failed)?.message)
+            _error.value = when (outcome) {
+                is SyncOutcome.Done -> "Passphrase changed. Enter it on your other devices when they ask."
+                is SyncOutcome.Failed -> outcome.message
+                is SyncOutcome.Busy -> "A sync is running. Try again in a moment."
+                else -> "Passphrase was not changed."
+            }
+        }
+    }
+
     fun disconnectSync() {
         syncDebounce?.cancel()
         syncConfig.clear()
         syncState.update { SyncState(tombstones = it.tombstones) }
+        syncRunner.updateBackgroundJob()
         publishSyncStatus()
         _error.value = "Sync is off. Your chats here and the files at the sync location were left as they are."
     }
@@ -951,11 +1198,20 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAutoSync(on: Boolean) {
         syncConfig.setAutoSync(on)
+        syncRunner.updateBackgroundJob()
         publishSyncStatus(_sync.value.running, _sync.value.progress)
     }
 
     fun setSyncWifiOnly(on: Boolean) {
         syncConfig.setWifiOnly(on)
+        syncRunner.updateBackgroundJob()
+        publishSyncStatus(_sync.value.running, _sync.value.progress)
+    }
+
+    /** How often the phone looks for changes while the app is closed, in minutes; 0 for never. */
+    fun setSyncBackgroundMinutes(minutes: Int) {
+        syncConfig.setBackgroundMinutes(minutes)
+        syncRunner.updateBackgroundJob()
         publishSyncStatus(_sync.value.running, _sync.value.progress)
     }
 
@@ -976,86 +1232,23 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (syncConfig.syncSettings) scheduleSync()
     }
 
-    private fun onMeteredOrOffline(): Boolean {
-        val manager = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)
-        val caps = manager.getNetworkCapabilities(manager.activeNetwork) ?: return true
-        return !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-    }
-
-    /** What the sync engine needs to know about the synced settings. */
-    private fun syncSettingsHandle() = object : SyncSettings {
-        override fun fingerprint() = SettingsSync.fingerprint(prefs.all, syncKeys)
-
-        override fun changedAt(): Long {
-            val file = File(getApplication<Application>().dataDir, "shared_prefs/settings.xml")
-            return file.lastModified().takeIf { it > 0 } ?: System.currentTimeMillis()
-        }
-
-        override fun export() = SettingsBackup.toJson(prefs.all, syncKeys).toString()
-
-        override fun apply(json: String) {
-            applySettings(JSONObject(json), syncKeys)
-        }
-    }
-
     /** One sync at a time. A request that arrives during a sync is run right after it, so no change is missed. */
     private fun runSync(manual: Boolean) {
         viewModelScope.launch {
-            if (!syncConfig.configured) return@launch
-            if (!manual && syncConfig.wifiOnly && onMeteredOrOffline()) return@launch
-            if (!syncMutex.tryLock()) {
-                syncAgain = true
-                return@launch
-            }
-            try {
-                val connection = syncConfig.load()
-                if (connection == null) {
-                    syncConfig.recordResult(null, "Sync needs to be set up again on this phone.")
-                    if (manual) _error.value = "Sync needs to be set up again on this phone."
-                    return@launch
-                }
-                publishSyncStatus(running = true, progress = "Starting")
-                val app = getApplication<Application>()
-                val job = currentCoroutineContext()[Job]
-                val options = SyncOptions(
-                    settings = if (syncConfig.syncSettings) syncSettingsHandle() else null,
-                    busyChatIds = setOfNotNull(currentChatId),
-                    onChatChanged = { id -> viewModelScope.launch { stateCache.delete(id) } },
-                    onProgress = { text -> _sync.update { it.copy(progress = text) } },
-                    cancelled = { job?.isActive == false },
-                )
-                val report = withContext(Dispatchers.IO) {
-                    val files = app.filesDir
-                    SyncEngine(
-                        File(files, "chats"), File(files, "images"), File(files, "docs"),
-                        connection.target.open(app), connection.header, connection.key, syncState,
-                    ).run(options)
-                }
-                val summary = report.summary()
-                syncConfig.recordResult(summary, null)
-                report.warnings.forEach { AppLog.note("Sync: $it") }
-                if (report.changedHere) refreshChats()
-                if (manual) _error.value = summary
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                val message = e.message ?: e::class.simpleName ?: "Unknown error"
-                syncConfig.recordResult(null, message)
-                AppLog.note("Sync failed: $message")
-                if (manual) _error.value = "Sync failed: $message"
-            } finally {
-                syncMutex.unlock()
-                publishSyncStatus()
-                if (syncAgain) {
-                    syncAgain = false
-                    scheduleSync(SYNC_SOON_MS)
-                }
+            val job = currentCoroutineContext()[Job]
+            val outcome = withContext(Dispatchers.IO) { syncRunner.run(manual) { job?.isActive == false } }
+            when (outcome) {
+                SyncOutcome.Busy -> syncAgain = true
+                is SyncOutcome.Done -> if (manual) _error.value = outcome.report.summary()
+                is SyncOutcome.Failed -> if (manual) _error.value = "Sync failed: ${outcome.message}"
+                else -> {}
             }
         }
     }
 
     /** The photo and document files at the sync location that belong to [chat], so a deletion can remove them. */
     private fun remoteFilesOf(chat: SavedChat): List<String> =
-        chat.messages.mapNotNull { it.imagePath }.map { File(it).name }.filter(SyncNames::validImage).map(SyncNames::image) +
+        chat.messages.flatMap { it.images }.map { File(it).name }.filter(SyncNames::validImage).map(SyncNames::image) +
             chat.attachments.map { it.id }.filter(SyncNames::validId).map(SyncNames::doc)
 
     private suspend fun rememberDeletion(chat: SavedChat) {
@@ -1187,6 +1380,30 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString(KEY_SEARCH_SERVER, address).apply()
     }
 
+    private val _searchProvider = MutableStateFlow(
+        SearchProvider.initial(prefs.getString(KEY_SEARCH_PROVIDER, null), prefs.getString(KEY_SEARCH_SERVER, "") ?: ""),
+    )
+
+    /** Which service the web search tool asks. */
+    val searchProvider = _searchProvider.asStateFlow()
+
+    fun setSearchProvider(provider: SearchProvider) {
+        _searchProvider.value = provider
+        prefs.edit().putString(KEY_SEARCH_PROVIDER, provider.id).apply()
+    }
+
+    private val _braveKey = MutableStateFlow(prefs.getString(KEY_BRAVE_KEY, "") ?: "")
+
+    /** The Brave Search API key. Kept on this phone only: it is left out of backups and sync. */
+    val braveKey = _braveKey.asStateFlow()
+
+    fun setBraveKey(key: String) {
+        _braveKey.value = key.trim()
+        prefs.edit().putString(KEY_BRAVE_KEY, key.trim()).apply()
+    }
+
+    private fun searchConfig() = SearchConfig(_searchProvider.value, _searchServer.value, _braveKey.value)
+
     fun setToolEnabled(tool: ToolId, on: Boolean) {
         _enabledTools.update { if (on) it + tool else it - tool }
         prefs.edit().putString(KEY_TOOLS, Tools.serialise(_enabledTools.value)).apply()
@@ -1232,15 +1449,97 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     // Created on first use and shut down in onCleared, so an unused voice engine is never started.
     private var speaker: Speaker? = null
 
-    fun speak(message: ChatMessage) {
+    fun speak(message: ChatMessage) = speakText(message.id, Thinking.answerOnly(message.text))
+
+    private fun speakText(id: String, text: String) {
         val voice = speaker ?: Speaker(
-            getApplication(), onSpeaking = { _speakingId.value = it }, onProblem = { _error.value = it },
+            getApplication(),
+            onSpeaking = {
+                _speakingId.value = it
+                if (it == null) voiceEvent(VoiceLoop.Event.SpeechFinished)
+            },
+            onProblem = { _error.value = it },
         ).also { speaker = it }
-        voice.speak(message.id, Thinking.answerOnly(message.text))
+        voice.speak(id, text)
     }
 
     fun stopSpeaking() {
         speaker?.stop()
+    }
+
+    // ---- Hands-free voice conversation ---------------------------------------------------
+
+    private val _voice = MutableStateFlow(VoiceLoop.State())
+
+    /** Where the hands-free conversation is: off, listening, waiting for the reply, or speaking it. */
+    val voiceState = _voice.asStateFlow()
+
+    private val _voicePartial = MutableStateFlow("")
+
+    /** What the microphone has heard so far of the sentence being spoken. */
+    val voicePartial = _voicePartial.asStateFlow()
+
+    private var voiceListener: VoiceListener? = null
+
+    /** Starts listening. The microphone permission must already be granted. */
+    fun startVoiceMode() {
+        if (_voice.value.phase != VoiceLoop.Phase.Off) return
+        if (_loadedModel.value == null) { _error.value = "Load a model first."; return }
+        if (!VoiceListener.available(getApplication())) { _error.value = "This phone has no speech recognition."; return }
+        stopSpeaking()
+        voiceEvent(VoiceLoop.Event.Start)
+    }
+
+    fun stopVoiceMode() = voiceEvent(VoiceLoop.Event.Stop)
+
+    /** Runs one step of the conversation. Safe to call from any thread. */
+    private fun voiceEvent(event: VoiceLoop.Event) {
+        val action = synchronized(_voice) {
+            val (state, action) = VoiceLoop.next(_voice.value, event)
+            _voice.value = state
+            state.note?.let { _error.value = it }
+            action
+        }
+        viewModelScope.launch { runVoiceAction(action) }
+    }
+
+    private suspend fun runVoiceAction(action: VoiceLoop.Action) {
+        when (action) {
+            VoiceLoop.Action.None -> {}
+            VoiceLoop.Action.Listen -> {
+                _voicePartial.value = ""
+                // A short pause, so the end of the spoken reply is not heard as the next question.
+                delay(VOICE_PAUSE_MS)
+                if (_voice.value.phase != VoiceLoop.Phase.Listening) return
+                val listener = voiceListener ?: VoiceListener(
+                    getApplication(),
+                    onPartial = { _voicePartial.value = it },
+                    onResult = { voiceEvent(it) },
+                ).also { voiceListener = it }
+                listener.listen()
+            }
+            is VoiceLoop.Action.Send -> {
+                _voicePartial.value = ""
+                if (!send(action.text)) voiceEvent(VoiceLoop.Event.ReplyReady(null))
+            }
+            is VoiceLoop.Action.Speak -> {
+                val say = SpeechText.chunks(SpeechText.clean(action.text))
+                if (say.isEmpty()) voiceEvent(VoiceLoop.Event.SpeechFinished)
+                else _messages.value.lastOrNull()?.let { speakText(it.id, action.text) }
+            }
+            VoiceLoop.Action.StopAll -> {
+                _voicePartial.value = ""
+                voiceListener?.stop()
+                stopSpeaking()
+            }
+        }
+    }
+
+    /** Called when a reply has finished (or failed), so a hands-free conversation can carry on. */
+    private fun voiceReplyFinished() {
+        if (_voice.value.phase != VoiceLoop.Phase.Thinking) return
+        val reply = _messages.value.lastOrNull()?.takeIf { !it.isUser }?.let { Thinking.answerOnly(it.text) }
+        voiceEvent(VoiceLoop.Event.ReplyReady(reply))
     }
 
     // ---- Quick access (tile, widget, shortcut) -------------------------------------
@@ -1302,6 +1601,22 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Preset chosen for just this chat, or null to follow the app-wide default. */
     val chatPresetId = _chatPresetId.asStateFlow()
+
+    private val _thinking = MutableStateFlow(true)
+
+    /** Whether a model that thinks first may do so in this chat. */
+    val thinking = _thinking.asStateFlow()
+
+    private val _thinkingSupported = MutableStateFlow(false)
+
+    /** True if the loaded model writes a thinking section, so the switch is worth showing. */
+    val thinkingSupported = _thinkingSupported.asStateFlow()
+
+    fun setChatThinking(on: Boolean) {
+        _thinking.value = on
+        viewModelScope.launch { runCatching { engine.setThinking(on) } }
+        if (_messages.value.isNotEmpty()) saveCurrentChat()
+    }
 
     private val _jsonMode = MutableStateFlow(false)
 
@@ -1441,27 +1756,35 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** True when the loaded model has a working projector, so images can be sent. */
     val visionReady = _visionReady.asStateFlow()
 
-    private val _pendingImage = MutableStateFlow<String?>(null)
-    val pendingImage = _pendingImage.asStateFlow()
+    private val _pendingImages = MutableStateFlow<List<String>>(emptyList())
 
-    private fun attachImage(uri: Uri) {
+    /** Photos waiting to be sent with the next message (up to [MAX_IMAGES]). */
+    val pendingImages = _pendingImages.asStateFlow()
+
+    private suspend fun attachImageNow(uri: Uri) {
         if (!_visionReady.value) {
             _error.value = "This model can't read images. Load a vision model and pick its projector in Models."
             return
         }
-        viewModelScope.launch {
-            try {
-                _pendingImage.value?.let { imageStore.delete(it) }
-                _pendingImage.value = imageStore.import(uri)
-            } catch (e: Exception) {
-                _error.value = e.message ?: "Could not attach the image"
-            }
+        if (_pendingImages.value.size >= MAX_IMAGES) {
+            _error.value = "A message can carry up to $MAX_IMAGES photos."
+            return
+        }
+        try {
+            val path = imageStore.import(uri).also { if (_incognito.value) incognitoLedger.add(IncognitoLedger.image(it)) }
+            _pendingImages.update { it + path }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not attach the image"
         }
     }
 
-    fun removePendingImage() {
-        _pendingImage.value?.let { path -> viewModelScope.launch { imageStore.delete(path) } }
-        _pendingImage.value = null
+    /** Takes one waiting photo off the message, or all of them when [path] is null. */
+    fun removePendingImage(path: String? = null) {
+        val removed = if (path == null) _pendingImages.value else _pendingImages.value.filter { it == path }
+        removed.forEach { photo -> viewModelScope.launch { imageStore.delete(photo) } }
+        _pendingImages.update { list -> if (path == null) emptyList() else list - path }
     }
 
     private val _modelInfo = MutableStateFlow<Map<String, ModelInfo>>(emptyMap())
@@ -1572,13 +1895,48 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _search.value = SearchState(query = q, loading = true)
         searchJob = viewModelScope.launch {
             try {
-                val results = hub.search(q)
-                if (epoch == hubEpoch) _search.value = SearchState(query = q, searched = true, results = results)
+                val page = hub.searchPage(q)
+                if (epoch == hubEpoch) {
+                    _search.value = SearchState(query = q, searched = true, results = page.results, next = page.next)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _search.value = SearchState(query = q, searched = true)
                 _error.value = "Search failed: ${e.message}"
+            }
+        }
+    }
+
+    /** Fetches the next page of the current search and adds it below the results already shown. */
+    fun loadMoreResults() {
+        val current = _search.value
+        val cursor = current.next ?: return
+        if (current.loadingMore || current.loading) return
+        val hub = try {
+            currentHub()
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not open that repository"
+            return
+        }
+        val epoch = hubEpoch
+        _search.value = current.copy(loadingMore = true)
+        searchJob = viewModelScope.launch {
+            try {
+                val page = hub.searchPage(current.query, cursor)
+                if (epoch == hubEpoch) {
+                    val seen = current.results.map { it.id }.toSet()
+                    _search.value = current.copy(
+                        results = current.results + page.results.filter { it.id !in seen },
+                        next = page.next,
+                        loadingMore = false,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _search.value = current.copy(loadingMore = false)
+                _error.value = "Could not load more results: ${e.message}"
             }
         }
     }
@@ -1628,6 +1986,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     fun delete(model: LocalModel) {
         viewModelScope.launch {
             if (_loadedModel.value?.path == model.path) unload()
+            if (_embeddingFile.value == model.fileName) {
+                runCatching { embedder.unload() }
+                _embeddingFile.value = ""
+                prefs.edit().putString(KEY_EMBED_MODEL, "").apply()
+                vectorJob?.cancel()
+                docVectors = null
+            }
             store.delete(model.fileName)
             refreshModels()
         }
@@ -1639,12 +2004,20 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
      * Loads [model] into the engine. With [resetChat] the conversation is cleared too; opening a
      * saved chat passes false so its messages stay on screen while the native context is rebuilt.
      */
-    fun load(model: LocalModel, resetChat: Boolean = true, restore: Boolean = false) {
+    fun load(model: LocalModel, resetChat: Boolean = true, restore: Boolean = false, incognito: Boolean = false) {
         if (_loading.value || _benchmarking.value || _apiBusy.value) return
+        if (embeddingModels.value.any { it.path == model.path }) {
+            _error.value = "${model.fileName.removeSuffix(".gguf")} is an embedding model, for searching documents by meaning. " +
+                "It cannot chat. Choose it in Settings, Document search."
+            return
+        }
         viewModelScope.launch {
             _loading.value = true
             try {
-                if (resetChat) clearConversation()
+                if (resetChat) {
+                    clearConversation()
+                    _incognito.value = incognito
+                }
                 val restored = loadIntoEngine(model, restoreFor = turns().takeIf { restore })
                 if (restored) pendingContext = null
             } catch (e: Exception) {
@@ -1693,6 +2066,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (applyJson) applyOutputConstraint()
         engine.draftStatus().takeIf { it.isNotEmpty() && !it.startsWith("Draft model on") }?.let { _error.value = it }
+        engine.adapterStatus().takeIf { it.isNotEmpty() }?.let { _error.value = it }
+        if (!engine.cacheAsRequested()) {
+            _error.value = "This phone could not use the compressed memory cache, so the normal one is in use."
+        }
+        engine.setThinking(_thinking.value)
+        _thinkingSupported.value = engine.supportsThinking()
         refreshContextUsage()
         return restored
     }
@@ -1728,21 +2107,25 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _loadedModel.value?.let { load(it) }
     }
 
-    fun send(text: String) {
-        val image = _pendingImage.value
-        val prompt = text.trim().ifEmpty { if (image != null) "Describe this image." else "" }
-        if (prompt.isEmpty() || _generating.value || _benchmarking.value || _apiBusy.value || _loadedModel.value == null) return
+    /** Sends [text] as the next message. Returns false if it could not be sent right now. */
+    fun send(text: String): Boolean {
+        val images = _pendingImages.value
+        val prompt = text.trim().ifEmpty { if (images.isNotEmpty()) (if (images.size > 1) "Describe these images." else "Describe this image.") else "" }
+        if (prompt.isEmpty() || _generating.value || _benchmarking.value || _apiBusy.value || _loadedModel.value == null) return false
 
         stopSpeaking()
         if (currentChatId == null) currentChatId = UUID.randomUUID().toString()
-        _pendingImage.value = null
-        _messages.update { it + ChatMessage(prompt, true, imagePath = image) }
+        _pendingImages.value = emptyList()
+        _messages.update { it + ChatMessage(prompt, true, imagePath = images.firstOrNull(), moreImages = images.drop(1)) }
         touch()
         if (_sleeping.value || contextStale) {
-            viewModelScope.launch { if (readyForMessage()) startGeneration(prompt, image) }
+            viewModelScope.launch {
+                if (readyForMessage()) startGeneration(prompt, images) else voiceReplyFinished()
+            }
         } else {
-            startGeneration(prompt, image)
+            startGeneration(prompt, images)
         }
+        return true
     }
 
     /** Wakes the model, or rebuilds its memory, when it no longer matches the chat on screen. */
@@ -1801,9 +2184,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (_generating.value || _loading.value) return
         val model = _loadedModel.value ?: return
         val msgs = _messages.value
-        val image = msgs[index].imagePath
+        val images = msgs[index].images
         val prior = msgs.take(index)
-        val discardedImages = msgs.drop(index + 1).mapNotNull { it.imagePath }
+        val discardedImages = msgs.drop(index + 1).flatMap { it.images }
 
         viewModelScope.launch {
             _loading.value = true
@@ -1817,10 +2200,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 _loading.value = false
             }
             discardedImages.forEach { imageStore.delete(it) }
-            _messages.value = prior + ChatMessage(prompt, true, imagePath = image)
+            _messages.value = prior + ChatMessage(prompt, true, imagePath = images.firstOrNull(), moreImages = images.drop(1))
             pendingContext = Replay.build(turns(prior))
             pendingVariants = versions
-            startGeneration(prompt, image)
+            startGeneration(prompt, images)
         }
     }
 
@@ -1828,21 +2211,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingVariants: OtherReplies? = null
 
     /** Streams a reply to [prompt], which must already be the last message in the list. */
-    private fun startGeneration(prompt: String, imagePath: String? = null, continuing: Boolean = false) {
+    private fun startGeneration(prompt: String, imagePaths: List<String> = emptyList(), continuing: Boolean = false) {
         _cutOffId.value = null
         val carried = pendingVariants
         pendingVariants = null
         // After reopening a saved chat the engine has no memory of it, so replay it once.
-        val question = if (continuing) prompt else withDocumentContext(prompt)
-        val replayed = pendingContext != null
-        val enginePrompt = pendingContext?.let {
-            "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $question"
-        } ?: question
+        val replay = pendingContext
         pendingContext = null
-
-        val firstTitle = if (continuing) "Request to continue" else "Your message" +
-            (if (question != prompt) ", with excerpts from your documents" else "") +
-            (if (replayed) ", with the earlier conversation replayed" else "")
         val systemText = chatSystemPrompt
         val steps = ArrayList<PromptStep>()
 
@@ -1862,14 +2237,22 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             var firstAt = 0L
             var count = 0
 
+            val question = if (continuing) prompt else runCatching { withDocumentContext(prompt) }.getOrDefault(prompt)
+            val enginePrompt = replay?.let {
+                "Here is our earlier conversation:\n$it\n\nContinue from there. My new message: $question"
+            } ?: question
+            val firstTitle = if (continuing) "Request to continue" else "Your message" +
+                (if (question != prompt) ", with excerpts from your documents" else "") +
+                (if (replay != null) ", with the earlier conversation replayed" else "")
+
             /** Streams one model turn into the reply bubble after [base]; returns what the model wrote. */
-            suspend fun streamRound(prompt: String, image: String?, base: String, title: String): String {
+            suspend fun streamRound(prompt: String, image: List<String>, base: String, title: String): String {
                 var written = ""
                 var recorded = false
-                val reply = if (image != null && _visionReady.value) {
-                    engine.sendUserPromptWithImage(prompt, image, _maxReplyTokens.value)
+                val reply = if (image.isNotEmpty() && _visionReady.value) {
+                    engine.sendUserPromptWithImages(prompt, image, ThrottlePolicy.replyCap(_maxReplyTokens.value, _throttle.value))
                 } else {
-                    engine.sendUserPrompt(prompt, _maxReplyTokens.value)
+                    engine.sendUserPrompt(prompt, ThrottlePolicy.replyCap(_maxReplyTokens.value, _throttle.value))
                 }
                 try {
                     reply.collect { token ->
@@ -1898,7 +2281,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
             try {
                 var prompt = enginePrompt
-                var image = imagePath
+                var image: List<String> = imagePaths
                 var base = if (continuing) _messages.value.last().text else ""
                 var toolRounds = 0
                 while (true) {
@@ -1906,13 +2289,13 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                     val call = if (tools.isEmpty()) null else Tools.parseCall(written)
                     if (call == null || toolRounds >= Tools.MAX_ROUNDS) break
 
-                    val outcome = Tools.run(call, tools, searchServer = _searchServer.value)
+                    val outcome = Tools.run(call, tools, search = searchConfig())
                     val before = written.substringBefore(Tools.OPEN_TAG).trim()
                     base = listOf(base.trimEnd(), before, Tools.statusLine(call, outcome))
                         .filter { it.isNotEmpty() }.joinToString("\n\n") + "\n\n"
                     _messages.update { list -> list.dropLast(1) + list.last().copy(text = base) }
                     prompt = Tools.followUp(call, outcome)
-                    image = null
+                    image = emptyList()
                     toolRounds++
                 }
                 // Reached only when the reply finished by itself: did it stop because it ran out of length?
@@ -1947,14 +2330,16 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                         firstTokenMs = firstAt - start,
                     )
                     _messages.update { list -> list.dropLast(1) + list.last().copy(stats = stats) }
-                    if (_readAloud.value) _messages.value.lastOrNull()?.let(::speak)
+                    if (_readAloud.value && _voice.value.phase == VoiceLoop.Phase.Off) _messages.value.lastOrNull()?.let(::speak)
                 }
                 saveCurrentChat()
                 saveChatState()
+                voiceReplyFinished()
                 if (count > 0 && !appVisible && _backgroundReplies.value) {
                     val chatTitle = _chats.value.firstOrNull { it.id == currentChatId }?.title
                         ?: _messages.value.firstOrNull { it.isUser }?.text?.lineSequence()?.first()?.take(48).orEmpty()
-                    ReplyNotifier.replyReady(getApplication(), chatTitle, Thinking.answerOnly(_messages.value.lastOrNull()?.text.orEmpty()))
+                    if (_incognito.value) ReplyNotifier.replyReady(getApplication(), "Incognito chat", "Your reply is ready.")
+                    else ReplyNotifier.replyReady(getApplication(), chatTitle, Thinking.answerOnly(_messages.value.lastOrNull()?.text.orEmpty()))
                 }
             }
         }
@@ -1971,6 +2356,89 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
      * Has the model condense the chat so far into a short summary, then carries on from that summary with the
      * memory freed up. The earlier messages stay on screen; only what the model remembers becomes shorter.
      */
+    /** The state of asking the model for notes worth remembering from the chat. */
+    sealed interface NoteSuggestionState {
+        data object Idle : NoteSuggestionState
+        data object Working : NoteSuggestionState
+        data class Ready(val suggestions: List<String>) : NoteSuggestionState
+    }
+
+    private val _noteSuggestions = MutableStateFlow<NoteSuggestionState>(NoteSuggestionState.Idle)
+    val noteSuggestions = _noteSuggestions.asStateFlow()
+
+    /**
+     * Asks the model what lasting facts about the user this chat reveals, to offer as memory notes. Nothing is added
+     * until the user picks. Like summarising, it uses the model's memory, so the chat is replayed on the next message.
+     */
+    fun suggestNotes() {
+        val model = _loadedModel.value ?: return
+        if (anythingRunning() || _noteSuggestions.value is NoteSuggestionState.Working) return
+        val history = turns()
+        if (history.none { it.isUser }) return
+
+        stopSpeaking()
+        _noteSuggestions.value = NoteSuggestionState.Working
+        _generating.value = true
+        if (_backgroundReplies.value) {
+            ReplyGateway.stopRequested = ::stopGeneration
+            ReplyService.start(getApplication())
+        }
+        generationJob = viewModelScope.launch {
+            var written = ""
+            var finished = false
+            try {
+                if (_sleeping.value && !wakeIfAsleep()) return@launch
+                touch()
+                awaitModelReady()
+                if (_jsonMode.value || _jsonSchema.value != null) engine.setOutputGrammar("")
+                engine.updateSampling(0.2f, paramsFor(model).topP)
+                engine.resetConversation(NoteSuggestions.SYSTEM_PROMPT)
+                val room = Summaries.transcriptChars(engine.contextUsage().total)
+                val known = _notes.value.map { it.text }
+                engine.sendUserPrompt(NoteSuggestions.requestFor(NoteSuggestions.transcript(history, room), known), NoteSuggestions.REPLY_TOKENS)
+                    .collect { written += it }
+                finished = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = "Could not look for notes: ${e.message ?: e::class.simpleName}"
+            } finally {
+                withContext(NonCancellable) {
+                    _noteSuggestions.value = if (finished) {
+                        NoteSuggestionState.Ready(NoteSuggestions.parse(written, _notes.value.map { it.text }))
+                    } else {
+                        NoteSuggestionState.Idle
+                    }
+                    try {
+                        awaitModelReady()
+                        val settings = paramsFor(model)
+                        engine.updateSampling(settings.temperature, settings.topP)
+                        engine.resetConversation(chatSystemPrompt)
+                        applyOutputConstraint()
+                        pendingContext = Replay.build(turns())
+                        contextStale = false
+                    } catch (e: Exception) {
+                        _error.value = "Could not get the model ready again: ${e.message ?: e::class.simpleName}"
+                    }
+                    _generating.value = false
+                    ReplyService.stop(getApplication())
+                    touch()
+                    refreshContextUsage()
+                }
+            }
+        }
+    }
+
+    /** Adds the chosen suggestions as memory notes and closes the suggestion list. */
+    fun addSuggestedNotes(texts: List<String>) {
+        texts.forEach(::addNote)
+        _noteSuggestions.value = NoteSuggestionState.Idle
+    }
+
+    fun dismissNoteSuggestions() {
+        _noteSuggestions.value = NoteSuggestionState.Idle
+    }
+
     fun summariseChat() {
         val model = _loadedModel.value ?: return
         if (anythingRunning()) return
@@ -2076,6 +2544,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             if (_jsonSchema.value != null) append("\nReplies follow a JSON schema")
             else if (_jsonMode.value) append("\nReplies must be valid JSON")
             engine.draftStatus().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
+            params.adapters.takeIf { it.isNotEmpty() }?.let { list ->
+                append("\nAdapters: ").append(list.joinToString(", ") { File(it.path).name.removeSuffix(".gguf") + " x" + it.scale })
+            }
+            engine.adapterStatus().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
         }
     }
 
@@ -2084,25 +2556,29 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Fetches the page at [address] and attaches its text to the chat like a document. */
     fun attachWebPage(address: String) {
         if (_attachStatus.value != null) return
+        viewModelScope.launch { attachWebPageNow(address) }
+    }
+
+    private suspend fun attachWebPageNow(address: String) {
         val url = WebPage.normalise(address)
         if (url == null) {
             _error.value = "That doesn't look like a web address."
             return
         }
-        viewModelScope.launch {
-            _attachStatus.value = "Reading the page…"
-            try {
-                val page = withContext(Dispatchers.IO) { WebPage.fetch(url) }
-                val name = page.title.replace(Regex("\\s+"), " ").take(48).ifBlank { "Web page" }
-                val doc = docStore.saveText(name, "Source: $url\n\n${page.text}")
-                _attachments.update { it + doc }
-                rebuildDocIndex()
-                if (_messages.value.isNotEmpty()) saveCurrentChat()
-            } catch (e: Exception) {
-                _error.value = e.message ?: "Could not read that page"
-            } finally {
-                _attachStatus.value = null
-            }
+        _attachStatus.value = "Reading the page…"
+        try {
+            val page = withContext(Dispatchers.IO) { WebPage.fetch(url) }
+            val name = page.title.replace(Regex("\\s+"), " ").take(48).ifBlank { "Web page" }
+            val doc = docStore.saveText(name, "Source: $url\n\n${page.text}").also { noteIncognitoDoc(it) }
+            _attachments.update { it + doc }
+            rebuildDocIndex()
+            if (_messages.value.isNotEmpty()) saveCurrentChat()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not read that page"
+        } finally {
+            _attachStatus.value = null
         }
     }
 
@@ -2139,12 +2615,56 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         refreshDiagnostics()
     }
 
+    // ---- Text recognition language ------------------------------------------------------
+
+    private val _ocrScript = MutableStateFlow(OcrScript.fromId(prefs.getString(KEY_OCR_SCRIPT, null)))
+
+    /** The writing system that scanned pages and photos are read as. */
+    val ocrScript = _ocrScript.asStateFlow()
+
+    private fun setOcrScriptInternal(script: OcrScript) {
+        _ocrScript.value = script
+        Ocr.script = script
+    }
+
+    fun setOcrScript(script: OcrScript) {
+        setOcrScriptInternal(script)
+        prefs.edit().putString(KEY_OCR_SCRIPT, script.id).apply()
+    }
+
+    private val _ocrStatus = MutableStateFlow<String?>(null)
+
+    /** Progress or the result of downloading a text recognition language, for the Settings screen. */
+    val ocrStatus = _ocrStatus.asStateFlow()
+
+    private var ocrJob: Job? = null
+
+    /** Downloads the language data for the chosen writing system now, rather than the first time it is needed. */
+    fun downloadOcrLanguage() {
+        if (ocrJob?.isActive == true) return
+        val script = Ocr.script
+        ocrJob = viewModelScope.launch {
+            _ocrStatus.value = "Checking…"
+            try {
+                Ocr.ensureReady(getApplication(), script) { _ocrStatus.value = it }
+                _ocrStatus.value = "${script.label} text recognition is ready and works offline."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _ocrStatus.value = e.message ?: "The download failed."
+            }
+        }
+    }
+
     // ---- Document attachments (retrieval) -------------------------------------
 
     private val docStore = DocumentStore(app)
     private val _attachments = MutableStateFlow<List<Attachment>>(emptyList())
     val attachments = _attachments.asStateFlow()
     private var docIndex: Bm25Index? = null
+    /** Meaning vectors for every passage of [docIndex], in the same order, once they have been made. */
+    private var docVectors: List<FloatArray>? = null
+    private var vectorJob: Job? = null
 
     private val _attachStatus = MutableStateFlow<String?>(null)
 
@@ -2153,31 +2673,74 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun attach(uri: Uri) {
         if (_attachStatus.value != null) return
+        viewModelScope.launch { attachNow(uri) }
+    }
+
+    /** Attaches a picked or shared file or photo and returns when it is done. */
+    private suspend fun attachNow(uri: Uri) {
         val isImage = getApplication<Application>().contentResolver.getType(uri)?.startsWith("image/") == true
         // A model that can see sends the photo itself; otherwise its text is read and attached as a document.
         if (isImage && _visionReady.value) {
-            attachImage(uri)
+            attachImageNow(uri)
             return
         }
-        viewModelScope.launch {
-            _attachStatus.value = if (isImage) "Reading text in the photo…" else "Reading the file…"
-            try {
-                val doc = if (isImage) {
-                    val text = Ocr.recognize(getApplication(), uri).trim()
-                    if (text.isEmpty()) throw IOException("No text was found in that photo, and the loaded model can't see images.")
-                    docStore.saveText("Photo text.txt", text)
-                } else {
-                    docStore.import(uri) { _attachStatus.value = it }
-                }
-                _attachments.update { it + doc }
-                rebuildDocIndex()
-                if (_messages.value.isNotEmpty()) saveCurrentChat()
-            } catch (e: Exception) {
-                _error.value = e.message ?: "Could not attach the file"
-            } finally {
-                _attachStatus.value = null
+        _attachStatus.value = if (isImage) "Reading text in the photo…" else "Reading the file…"
+        try {
+            val doc = if (isImage) {
+                val text = Ocr.recognize(getApplication(), uri) { _attachStatus.value = it }.trim()
+                if (text.isEmpty()) throw IOException("No text was found in that photo, and the loaded model can't see images.")
+                docStore.saveText("Photo text.txt", text).also { noteIncognitoDoc(it) }
+            } else {
+                docStore.import(uri) { _attachStatus.value = it }.also { noteIncognitoDoc(it) }
             }
+            _attachments.update { it + doc }
+            rebuildDocIndex()
+            if (_messages.value.isNotEmpty()) saveCurrentChat()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not attach the file"
+        } finally {
+            _attachStatus.value = null
         }
+    }
+
+    /** Something shared into PocketLM: files go into a fresh chat, with a question ready to send. */
+    fun receiveFiles(uris: List<Uri>) {
+        val files = uris.take(ShareIntake.MAX_FILES)
+        if (files.isEmpty()) return
+        viewModelScope.launch {
+            startFreshChat()
+            val resolver = getApplication<Application>().contentResolver
+            for (uri in files) attachNow(uri)
+            _incomingText.value = ShareIntake.suggestedQuestion(ShareIntake.kindOf(resolver.getType(files.first())))
+        }
+    }
+
+    /** A link shared into PocketLM: its page is read into a fresh chat. */
+    fun receiveLink(url: String) {
+        viewModelScope.launch {
+            startFreshChat()
+            attachWebPageNow(url)
+            _incomingText.value = ShareIntake.suggestedQuestion(ShareIntake.Kind.Page)
+        }
+    }
+
+    /** A new chat for something shared in, so it does not get mixed into whatever was open. */
+    private suspend fun startFreshChat() {
+        if (_messages.value.isEmpty() && _attachments.value.isEmpty() && _pendingImages.value.isEmpty()) return
+        val model = _loadedModel.value
+        if (model != null && !_loading.value) {
+            load(model)
+            _loading.first { !it }
+        } else if (model == null) {
+            clearConversation()
+        }
+    }
+
+    /** Remembers a document made in an incognito chat, so it is deleted when that chat is left. */
+    private fun noteIncognitoDoc(doc: Attachment) {
+        if (_incognito.value) incognitoLedger.add(IncognitoLedger.doc(doc.id))
     }
 
     fun removeAttachment(doc: Attachment) {
@@ -2191,25 +2754,360 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun rebuildDocIndex() {
         val docs = _attachments.value.mapNotNull { a -> docStore.read(a.id)?.let { a.name to it } }
+        vectorJob?.cancel()
+        docVectors = null
         docIndex = if (docs.isEmpty()) null else withContext(Dispatchers.Default) { Bm25Index.build(docs) }
+        if (docIndex == null) {
+            _indexStatus.value = null
+            releaseEmbedder()
+        } else {
+            startVectorIndexing()
+        }
+    }
+
+    // ---- Searching documents by meaning ----------------------------------------------
+
+    private val embedder = AiChat.getEmbeddingEngine(app)
+    private val _embeddingFile = MutableStateFlow(prefs.getString(KEY_EMBED_MODEL, "") ?: "")
+
+    /** File name of the embedding model that documents are searched with by meaning, or empty for keywords only. */
+    val embeddingFile = _embeddingFile.asStateFlow()
+
+    /** Downloaded models that make embeddings (as opposed to chat models). */
+    val embeddingModels: StateFlow<List<LocalModel>> =
+        combine(_models, _modelInfo) { models, info -> models.filter { EmbeddingModels.isEmbedding(info[it.path]?.architecture, it.fileName) } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val _indexStatus = MutableStateFlow<String?>(null)
+
+    /** Progress while documents are read for meaning search, or null. */
+    val indexStatus = _indexStatus.asStateFlow()
+
+    private val _embeddingNote = MutableStateFlow<String?>(null)
+
+    /** The result of trying the chosen embedding model, shown in Settings. */
+    val embeddingNote = _embeddingNote.asStateFlow()
+
+    private fun selectedEmbeddingModel(): LocalModel? =
+        _embeddingFile.value.takeIf { it.isNotEmpty() }?.let { file -> _models.value.firstOrNull { it.fileName == file } }
+
+    /** Chooses the embedding model for document search; an empty name goes back to keyword search only. */
+    fun setEmbeddingModel(fileName: String) {
+        _embeddingFile.value = fileName
+        prefs.edit().putString(KEY_EMBED_MODEL, fileName).apply()
+        _embeddingNote.value = null
+        vectorJob?.cancel()
+        docVectors = null
+        viewModelScope.launch {
+            val model = selectedEmbeddingModel()
+            if (model == null) {
+                releaseEmbedder()
+                return@launch
+            }
+            // Try it now, so a model that does not work is found out here and not in the middle of a question.
+            _embeddingNote.value = "Trying ${model.fileName.removeSuffix(".gguf")}…"
+            _embeddingNote.value = try {
+                ensureEmbedder(model)
+                "Ready: ${embedder.dimensions}-number vectors"
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _embeddingFile.value = ""
+                prefs.edit().putString(KEY_EMBED_MODEL, "").apply()
+                e.message ?: "That model could not be used."
+            }
+            if (docIndex != null) startVectorIndexing()
+            // The notes folder is read again with the new model, so its passages match by meaning too.
+            if (prefs.getString(KEY_NOTES_FOLDER, null) != null) updateNotes()
+        }
+    }
+
+    private suspend fun ensureEmbedder(model: LocalModel) {
+        if (embedder.loadedPath != model.path) embedder.load(model.path, threads = 0, maxTokens = EMBED_MAX_TOKENS)
+    }
+
+    private fun releaseEmbedder() {
+        vectorJob?.cancel()
+        docVectors = null
+        viewModelScope.launch { runCatching { embedder.unload() } }
+    }
+
+    /** Reads every passage with the embedding model in the background; keyword search works meanwhile. */
+    private fun startVectorIndexing() {
+        vectorJob?.cancel()
+        docVectors = null
+        val model = selectedEmbeddingModel() ?: return
+        val index = docIndex ?: return
+        val attachments = _attachments.value
+        vectorJob = viewModelScope.launch {
+            try {
+                ensureEmbedder(model)
+                val prefixes = EmbeddingModels.prefixes(model.fileName)
+                val file = File(model.path)
+                val total = index.chunkList.size
+                val all = ArrayList<FloatArray>(total)
+                for (attachment in attachments) {
+                    val text = docStore.read(attachment.id) ?: continue
+                    val pieces = Chunker.split(text)
+                    val key = EmbeddingFile.key(model.fileName, file.length(), file.lastModified(), prefixes, text)
+                    val saved = docStore.readVectors(attachment.id)?.let { EmbeddingFile.read(it, key, pieces.size) }
+                    if (saved != null) {
+                        all += saved
+                        continue
+                    }
+                    val made = ArrayList<FloatArray>(pieces.size)
+                    for (piece in pieces) {
+                        ensureActive()
+                        _indexStatus.value = "Reading your documents for meaning search… ${all.size + made.size} of $total"
+                        made += embedder.embed(prefixes.passage + piece)
+                    }
+                    docStore.writeVectors(attachment.id, EmbeddingFile.write(key, made))
+                    all += made
+                }
+                if (docIndex === index && all.size == total) docVectors = all
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.note("Meaning search is off: ${e.message}")
+                _error.value = "Searching by meaning is off for now: ${e.message ?: e::class.simpleName}"
+            } finally {
+                _indexStatus.value = null
+            }
+        }
+    }
+
+    /** The question as a vector, or null if meaning search is not ready (the keyword search then works alone). */
+    private suspend fun questionVector(question: String, notesHaveMeaning: Boolean = false): FloatArray? {
+        val model = selectedEmbeddingModel() ?: return null
+        if (docVectors == null && !notesHaveMeaning) return null
+        return try {
+            withTimeout(EMBED_QUESTION_TIMEOUT_MS) {
+                ensureEmbedder(model)
+                embedder.embed(EmbeddingModels.prefixes(model.fileName).query + question.take(2_000))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /** Wraps [question] with the most relevant excerpts from the attached documents, if any. */
-    private fun withDocumentContext(question: String): String {
-        val index = docIndex ?: return question
+    private suspend fun withDocumentContext(question: String): String {
+        val index = docIndex
+        val notes = if (_useNotes.value && _notesStatus.value.folderName != null) notesSearcher() else null
+        if (index == null && notes == null) return question
         val contextSize = engine.contextUsage().total.takeIf { it > 0 } ?: _generationParams.value.contextSize
         val budget = contextSize / 4 * 3 // ~3 chars per token, a quarter of the context
-        val hits = index.search(question, budget)
-        if (hits.isEmpty()) return question
-        val excerpts = hits.joinToString("\n\n") { "[${it.docName}]\n${it.text}" }
-        return "Answer using these excerpts from the user's attached documents. " +
-            "If they don't contain the answer, say so.\n\nExcerpts:\n$excerpts\n\nQuestion: $question"
+        val share = if (index != null && notes != null) budget / 2 else budget
+        val vector = questionVector(question, notes?.hasMeaning == true)
+        val fromDocuments = index?.let { DocumentSearch(it, docVectors).search(question, vector, share) }.orEmpty()
+        val fromNotes = notes?.search(question, vector, share).orEmpty()
+        return NotesRules.excerptsPrompt(question, fromDocuments, fromNotes)
+    }
+
+    // ---- Ask my notes: a folder of notes searched from any chat ---------------------------
+
+    /** What Settings shows about the notes folder. */
+    data class NotesStatus(
+        val folderName: String? = null,
+        val files: Int = 0,
+        val passages: Int = 0,
+        val meaning: Boolean = false,
+        val updatedAt: Long = 0,
+        /** Progress while the folder is being read, or null. */
+        val working: String? = null,
+        val problem: String? = null,
+    )
+
+    private val knowledge = KnowledgeStore(File(app.filesDir, "knowledge"))
+    private val notesScanner = NotesScanner(app)
+
+    private val _notesStatus = MutableStateFlow(
+        NotesStatus(
+            folderName = prefs.getString(KEY_NOTES_NAME, null),
+            files = if (prefs.getString(KEY_NOTES_FOLDER, null) != null) knowledge.manifest().size else 0,
+            passages = prefs.getInt(KEY_NOTES_PASSAGES, 0),
+            meaning = prefs.getBoolean(KEY_NOTES_MEANING, false),
+            updatedAt = prefs.getLong(KEY_NOTES_UPDATED, 0),
+        ),
+    )
+    val notesStatus = _notesStatus.asStateFlow()
+
+    private val _notesDefault = MutableStateFlow(prefs.getBoolean(KEY_NOTES_DEFAULT, true))
+
+    /** Whether new chats search the notes folder from the start. */
+    val notesDefault = _notesDefault.asStateFlow()
+
+    fun setNotesDefault(on: Boolean) {
+        _notesDefault.value = on
+        prefs.edit().putBoolean(KEY_NOTES_DEFAULT, on).apply()
+    }
+
+    private val _useNotes = MutableStateFlow(_notesDefault.value)
+
+    /** Whether the chat on screen searches the notes folder. */
+    val useNotes = _useNotes.asStateFlow()
+
+    fun setUseNotes(on: Boolean) {
+        _useNotes.value = on
+        if (_messages.value.isNotEmpty()) saveCurrentChat()
+    }
+
+    private var notesJob: Job? = null
+    private var notesSearch: DocumentSearch? = null
+
+    /** Remembers the folder the user picked and reads it. */
+    fun chooseNotesFolder(uri: Uri) {
+        notesJob?.cancel()
+        prefs.getString(KEY_NOTES_FOLDER, null)?.let { old -> if (old != uri.toString()) NotesScanner.releasePermission(getApplication(), Uri.parse(old)) }
+        knowledge.clear()
+        notesSearch = null
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { FolderBackend.displayName(getApplication(), uri) }
+            prefs.edit().putString(KEY_NOTES_FOLDER, uri.toString()).putString(KEY_NOTES_NAME, name)
+                .putInt(KEY_NOTES_PASSAGES, 0).putBoolean(KEY_NOTES_MEANING, false).putLong(KEY_NOTES_UPDATED, 0).apply()
+            _notesStatus.value = NotesStatus(folderName = name)
+            updateNotes()
+        }
+    }
+
+    /** Stops using the notes folder and erases what PocketLM saved about it. The folder itself is not touched. */
+    fun forgetNotesFolder() {
+        notesJob?.cancel()
+        prefs.getString(KEY_NOTES_FOLDER, null)?.let { NotesScanner.releasePermission(getApplication(), Uri.parse(it)) }
+        prefs.edit().remove(KEY_NOTES_FOLDER).remove(KEY_NOTES_NAME).remove(KEY_NOTES_PASSAGES).remove(KEY_NOTES_MEANING)
+            .remove(KEY_NOTES_UPDATED).apply()
+        notesSearch = null
+        viewModelScope.launch(Dispatchers.IO) { knowledge.clear() }
+        _notesStatus.value = NotesStatus()
+    }
+
+    /** Looks through the folder again, reading only files that are new or changed, then (if a search model is chosen) their meaning. */
+    fun updateNotes() {
+        val tree = prefs.getString(KEY_NOTES_FOLDER, null)?.let(Uri::parse) ?: return
+        notesJob?.cancel()
+        notesJob = viewModelScope.launch {
+            try {
+                _notesStatus.update { it.copy(working = "Looking through the folder…", problem = null) }
+                val scan = withContext(Dispatchers.IO) { notesScanner.scan(tree) }
+                val known = withContext(Dispatchers.IO) { knowledge.manifest() }
+                val plan = NotesRules.plan(known, scan.files.map { it.stamp })
+                val byPath = scan.files.associateBy { it.stamp.path }
+                val manifest = LinkedHashMap(known)
+                withContext(Dispatchers.IO) { plan.drop.forEach { knowledge.delete(it); manifest.remove(it) } }
+
+                var used = plan.keep.sumOf { known[it]?.size ?: 0L }
+                var truncated = false
+                plan.read.forEachIndexed { done, stamp ->
+                    ensureActive()
+                    _notesStatus.update { it.copy(working = "Reading notes… ${done + 1} of ${plan.read.size}") }
+                    val text = withContext(Dispatchers.IO) { runCatching { notesScanner.read(byPath.getValue(stamp.path)) }.getOrNull() }
+                    // A file that cannot be read is kept as empty, so it is not tried again until it changes.
+                    val keep = text != null && used + text.length <= NotesRules.MAX_TOTAL_CHARS
+                    if (text != null && !keep) truncated = true
+                    if (keep) used += text!!.length
+                    withContext(Dispatchers.IO) { knowledge.writeText(stamp.path, if (keep) text!! else "") }
+                    manifest[stamp.path] = stamp
+                }
+                withContext(Dispatchers.IO) { knowledge.saveManifest(manifest.values) }
+                notesSearch = null
+
+                val docs = withContext(Dispatchers.IO) { knowledge.documents().filter { it.second.isNotBlank() } }
+                val passages = withContext(Dispatchers.Default) { docs.sumOf { Chunker.split(it.second).size } }
+                val meaning = indexNotesMeaning(docs)
+                val now = System.currentTimeMillis()
+                prefs.edit().putInt(KEY_NOTES_PASSAGES, passages).putBoolean(KEY_NOTES_MEANING, meaning).putLong(KEY_NOTES_UPDATED, now).apply()
+                notesSearch = null
+                _notesStatus.update {
+                    it.copy(
+                        files = docs.size, passages = passages, meaning = meaning, updatedAt = now, working = null,
+                        problem = when {
+                            truncated || scan.tooMany -> "The folder is larger than PocketLM reads (about 3,000 files or 12 million characters); the rest was left out."
+                            docs.isEmpty() -> "No text, Markdown, HTML or PDF files were found in that folder."
+                            else -> null
+                        },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.note("Notes folder: ${e.message}")
+                _notesStatus.update { it.copy(working = null, problem = e.message ?: "The folder could not be read.") }
+            }
+        }
+    }
+
+    /** Reads every note with the embedding model (when one is chosen) so questions match by meaning too. True if all are done. */
+    private suspend fun indexNotesMeaning(docs: List<Pair<String, String>>): Boolean {
+        val model = selectedEmbeddingModel() ?: return false
+        return try {
+            ensureEmbedder(model)
+            val prefixes = EmbeddingModels.prefixes(model.fileName)
+            val file = File(model.path)
+            val pending = ArrayList<Triple<String, List<String>, String>>()
+            for ((path, text) in docs) {
+                val pieces = Chunker.split(text)
+                val key = EmbeddingFile.key(model.fileName, file.length(), file.lastModified(), prefixes, text)
+                val saved = knowledge.readVectors(path)?.let { EmbeddingFile.read(it, key, pieces.size) }
+                if (saved == null) pending += Triple(path, pieces, key)
+            }
+            val total = pending.sumOf { it.second.size }
+            var done = 0
+            for ((path, pieces, key) in pending) {
+                val vectors = ArrayList<FloatArray>(pieces.size)
+                for (piece in pieces) {
+                    currentCoroutineContext().ensureActive()
+                    _notesStatus.update { it.copy(working = "Reading notes for meaning search… ${done++} of $total") }
+                    vectors += embedder.embed(prefixes.passage + piece)
+                }
+                withContext(Dispatchers.IO) { knowledge.writeVectors(path, EmbeddingFile.write(key, vectors)) }
+            }
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLog.note("Notes meaning search: ${e.message}")
+            false
+        }
+    }
+
+    /** The notes folder as a search, built from the saved copy the first time it is needed after a change. */
+    private suspend fun notesSearcher(): DocumentSearch? {
+        notesSearch?.let { return it }
+        val model = selectedEmbeddingModel()
+        val built = withContext(Dispatchers.Default) {
+            val docs = knowledge.documents().filter { it.second.isNotBlank() }
+            if (docs.isEmpty()) return@withContext null
+            val keyword = Bm25Index.build(docs)
+            var vectors: List<FloatArray>? = null
+            if (model != null) {
+                val file = File(model.path)
+                val prefixes = EmbeddingModels.prefixes(model.fileName)
+                val all = ArrayList<FloatArray>()
+                for ((path, text) in docs) {
+                    val pieces = Chunker.split(text)
+                    val key = EmbeddingFile.key(model.fileName, file.length(), file.lastModified(), prefixes, text)
+                    val saved = knowledge.readVectors(path)?.let { EmbeddingFile.read(it, key, pieces.size) }
+                    if (saved == null) { all.clear(); break }
+                    all += saved
+                }
+                if (all.size == keyword.chunkList.size && all.isNotEmpty()) vectors = all
+            }
+            DocumentSearch(keyword, vectors)
+        }
+        notesSearch = built
+        return built
     }
 
     // ---- Chat history --------------------------------------------------------
 
     private val chatStore = ChatStore(app)
-    private var currentChatId: String? = null
+    private val _openChatId = MutableStateFlow<String?>(null)
+
+    /** Id of the chat on screen once it has been started or saved; used to mark it in the list beside the chat. */
+    val openChatId = _openChatId.asStateFlow()
+
+    private var currentChatId: String? by kotlin.properties.Delegates.observable(null) { _, _, new -> _openChatId.value = new }
     private var pendingContext: String? = null
 
     private val _chats = MutableStateFlow<List<SavedChat>>(emptyList())
@@ -2219,7 +3117,32 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { _chats.value = chatStore.list() }
     }
 
+    private val _incognito = MutableStateFlow(false)
+
+    /** True while the chat on screen is incognito: nothing about it is saved, synced or listed in History. */
+    val incognito = _incognito.asStateFlow()
+
+    private val incognitoLedger = IncognitoLedger(File(app.filesDir, "incognito.txt"))
+
+    /** Starts a new chat that is kept nowhere: it is erased, with its attachments, when you leave it. */
+    fun startIncognitoChat() {
+        val model = _loadedModel.value
+        if (model == null) {
+            _error.value = "Load a model first."
+            return
+        }
+        load(model, incognito = true)
+    }
+
+    /** Erases what an incognito chat left on disk. The conversation itself only ever existed in memory. */
+    private fun discardIncognito() {
+        if (!_incognito.value) return
+        _incognito.value = false
+        incognitoLedger.purge(File(getApplication<Application>().filesDir, "docs"), File(getApplication<Application>().filesDir, "images"))
+    }
+
     private fun clearConversation() {
+        discardIncognito()
         if (_messages.value.isEmpty()) {
             // Nothing was saved for this chat, so its attachments would be orphaned.
             _attachments.value.forEach { a -> viewModelScope.launch { docStore.delete(a.id) } }
@@ -2228,20 +3151,27 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _cutOffId.value = null
         _chatPresetId.value = null
         _jsonMode.value = false
+        _thinking.value = true
+        _useNotes.value = _notesDefault.value
         _jsonSchema.value = null
         _promptRecord.value = null
         contextStale = false
         _attachments.value = emptyList()
         docIndex = null
+        vectorJob?.cancel()
+        docVectors = null
+        _indexStatus.value = null
+        viewModelScope.launch { runCatching { embedder.unload() } }
         currentChatId = null
         pendingContext = null
         _messages.value = emptyList()
     }
 
     private fun stored(m: ChatMessage) =
-        StoredMessage(m.text, m.isUser, m.stats, m.imagePath, m.summary, m.others, m.position)
+        StoredMessage(m.text, m.isUser, m.stats, m.imagePath, m.summary, m.others, m.position, m.starred, moreImages = m.moreImages)
 
     private fun saveCurrentChat() {
+        if (_incognito.value) return
         val id = currentChatId ?: return
         val msgs = _messages.value.filter { it.isUser || it.text.isNotEmpty() }
         val firstUser = msgs.firstOrNull { it.isUser }?.text ?: return
@@ -2254,7 +3184,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             customTitle = existing?.customTitle ?: false,
             presetId = _chatPresetId.value,
             jsonMode = _jsonMode.value,
+            thinking = _thinking.value,
+            useNotes = _useNotes.value.takeIf { it != _notesDefault.value },
             jsonSchema = _jsonSchema.value,
+            tags = existing?.tags ?: emptyList(),
             modelFile = _loadedModel.value?.fileName,
             messages = msgs.map(::stored),
             attachments = _attachments.value,
@@ -2267,20 +3200,39 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Reopens a saved chat, reloading its model (or the current one) to get a clean context. */
-    fun openChat(chat: SavedChat) {
+    private val _scrollTarget = MutableStateFlow<Int?>(null)
+
+    /** A message the chat screen should scroll to once it is showing (set when a starred message is opened). */
+    val scrollTarget = _scrollTarget.asStateFlow()
+
+    fun consumeScrollTarget() {
+        _scrollTarget.value = null
+    }
+
+    /** Stars or un-stars a message, so it can be found in the list of starred messages. */
+    fun toggleStar(messageId: String) {
+        _messages.update { list -> list.map { if (it.id == messageId) it.copy(starred = !it.starred) else it } }
+        if (!_generating.value) saveCurrentChat()
+    }
+
+    fun openChat(chat: SavedChat, scrollToMessage: Int? = null) {
         if (_loading.value) return
+        _scrollTarget.value = scrollToMessage
         stopGeneration()
+        discardIncognito()
         currentChatId = chat.id
         _messages.value = chat.messages.map {
             ChatMessage(
-                it.text, it.isUser, stats = it.stats, imagePath = it.imagePath,
-                summary = it.summary, others = it.others, position = it.position,
+                it.text, it.isUser, stats = it.stats, imagePath = it.imagePath, moreImages = it.moreImages,
+                summary = it.summary, others = it.others, position = it.position, starred = it.starred,
             )
         }
         pendingContext = Replay.build(turns())
         _attachments.value = chat.attachments
         _chatPresetId.value = chat.presetId
         _jsonMode.value = chat.jsonMode
+        _thinking.value = chat.thinking
+        _useNotes.value = chat.useNotes ?: _notesDefault.value
         _jsonSchema.value = chat.jsonSchema
         contextStale = false
         viewModelScope.launch { rebuildDocIndex() }
@@ -2335,6 +3287,55 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private val _importing = MutableStateFlow<String?>(null)
+
+    /** Progress text while chats are being imported from a ChatGPT or Claude export, or null. */
+    val importProgress = _importing.asStateFlow()
+
+    /** Reads a ChatGPT or Claude data export (the .zip, or its conversations.json) and adds its conversations as chats. */
+    fun importChats(uri: Uri) {
+        if (_importing.value != null) return
+        viewModelScope.launch {
+            _importing.value = "Reading the file…"
+            try {
+                val existing = chatStore.list().associate { it.id to it.updatedAt }
+                val summary = withContext(Dispatchers.IO) {
+                    var stored = 0
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
+                        ChatImporter.read(stream) { chat ->
+                            if (ChatImporter.alreadyUpToDate(existing[chat.id], chat)) {
+                                false
+                            } else {
+                                chatStore.saveNow(chat.toSavedChat())
+                                if (++stored % 10 == 0) _importing.value = "Imported $stored chats…"
+                                true
+                            }
+                        }
+                    } ?: throw IOException("Cannot open that file")
+                }
+                refreshChats()
+                scheduleSync()
+                _error.value = summary.message()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _error.value = "Import failed: ${e.message ?: e::class.simpleName}"
+            } finally {
+                _importing.value = null
+            }
+        }
+    }
+
+    /** Replaces the labels on a chat. */
+    fun setTags(chat: SavedChat, tags: List<String>) {
+        val clean = ChatTags.clean(tags)
+        if (clean == chat.tags) return
+        viewModelScope.launch {
+            chatStore.save(chat.copy(tags = clean, updatedAt = System.currentTimeMillis()))
+            refreshChats()
+            scheduleSync()
+        }
+    }
+
     fun togglePin(chat: SavedChat) {
         viewModelScope.launch {
             chatStore.save(chat.copy(pinned = !chat.pinned, updatedAt = System.currentTimeMillis()))
@@ -2349,7 +3350,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             chatStore.delete(chat.id)
             stateCache.delete(chat.id)
             chat.attachments.forEach { docStore.delete(it.id) }
-            chat.messages.mapNotNull { it.imagePath }.forEach { imageStore.delete(it) }
+            chat.messages.flatMap { it.images }.forEach { imageStore.delete(it) }
             if (currentChatId == chat.id) {
                 clearConversation()
                 _loadedModel.value?.let { load(it) }
@@ -2371,8 +3372,21 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // If the app was closed in the middle of an incognito chat, erase what that chat left behind.
+        incognitoLedger.purge(File(app.filesDir, "docs"), File(app.filesDir, "images"))
+        if (prefs.getString(KEY_NOTES_FOLDER, null) != null) {
+            // Keep the notes up to date; only files that changed are read again.
+            viewModelScope.launch {
+                delay(NOTES_START_DELAY_MS)
+                updateNotes()
+            }
+        }
         refreshModels()
         refreshChats()
+        refreshAdapters()
+        pruneAdapters()
+        syncRunner.listener = syncListener
+        syncRunner.updateBackgroundJob()
         publishSyncStatus()
         if (syncConfig.configured && syncConfig.autoSync) {
             // Give the app a moment to finish starting before the network is used.
@@ -2397,6 +3411,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         ApiGateway.backend = apiBackend
         if (_apiEnabled.value) ApiService.start(getApplication())
         startDeviceMonitoring()
+        watchThrottle()
         viewModelScope.launch {
             center.events.collect { event ->
                 when (event) {
@@ -2408,6 +3423,11 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        discardIncognito()
+        if (syncRunner.listener === syncListener) syncRunner.listener = null
+        vectorJob?.cancel()
+        voiceListener?.stop()
+        CoroutineScope(Dispatchers.IO).launch { runCatching { embedder.unload() } }
         ReplyGateway.stopRequested = null
         ReplyService.stop(getApplication())
         if (ApiGateway.backend === apiBackend) ApiGateway.backend = null
@@ -2420,31 +3440,49 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val KEY_THEME = "theme_mode"
-        const val KEY_PRESETS = "custom_presets"
+        const val KEY_PRESETS = SettingKeys.PRESETS
         const val KEY_PROJECTOR = "projector_for_"
-        const val KEY_PRESET_ID = "selected_preset"
+        const val KEY_PRESET_ID = SettingKeys.PRESET_ID
         const val KEY_CTX = "gen_context_size"
         const val KEY_THREADS = "gen_threads"
-        const val KEY_TEMP = "gen_temperature"
-        const val KEY_TOP_P = "gen_top_p"
-        const val KEY_TOP_K = "gen_top_k"
-        const val KEY_MIN_P = "gen_min_p"
-        const val KEY_REPEAT = "gen_repeat_penalty"
-        const val KEY_SEED = "gen_seed"
-        const val KEY_STOP = "stop_words"
-        const val KEY_PROMPTS = "saved_prompts"
+        const val KEY_TEMP = SettingKeys.TEMP
+        const val KEY_TOP_P = SettingKeys.TOP_P
+        const val KEY_TOP_K = SettingKeys.TOP_K
+        const val KEY_MIN_P = SettingKeys.MIN_P
+        const val KEY_REPEAT = SettingKeys.REPEAT
+        const val KEY_SEED = SettingKeys.SEED
+        const val KEY_STOP = SettingKeys.STOP
+        const val KEY_PROMPTS = SettingKeys.PROMPTS
         const val KEY_BENCH = "benchmarks"
         const val KEY_LOCK = "app_lock"
-        const val KEY_READ_ALOUD = "read_aloud"
+        const val KEY_READ_ALOUD = SettingKeys.READ_ALOUD
         const val KEY_API_ENABLED = "api_enabled"
         const val KEY_BG_REPLIES = "background_replies"
-        const val KEY_TOOLS = "enabled_tools"
+        const val KEY_TOOLS = SettingKeys.TOOLS
         const val KEY_IDLE_MINUTES = "idle_minutes"
-        const val KEY_MAX_REPLY = "max_reply_tokens"
+        const val KEY_AUTO_THROTTLE = "auto_throttle"
+        const val KEY_EMBED_MODEL = "embedding_model"
+        const val KEY_CACHE_BITS = "cache_bits"
+        const val KEY_TEXT_SCALE = "text_scale"
+        const val NOTES_START_DELAY_MS = 8_000L
+        const val KEY_NOTES_FOLDER = "notes_folder"
+        const val KEY_NOTES_NAME = "notes_folder_name"
+        const val KEY_NOTES_PASSAGES = "notes_passages"
+        const val KEY_NOTES_MEANING = "notes_meaning"
+        const val KEY_NOTES_UPDATED = "notes_updated"
+        const val KEY_NOTES_DEFAULT = "notes_default"
+        const val VOICE_PAUSE_MS = 500L
+        const val EMBED_MAX_TOKENS = 512
+        const val EMBED_QUESTION_TIMEOUT_MS = 10_000L
+        const val KEY_MAX_REPLY = SettingKeys.MAX_REPLY
+        const val MAX_IMAGES = 4
+        const val KEY_OCR_SCRIPT = "ocr_script"
         const val KEY_MODEL_SETTINGS = "model_settings"
-        const val KEY_NOTES = "memory_notes"
-        const val KEY_SAVE_STATES = "save_chat_states"
+        const val KEY_NOTES = SettingKeys.NOTES
+        const val KEY_SAVE_STATES = SettingKeys.SAVE_STATES
         const val KEY_SEARCH_SERVER = "search_server"
+        const val KEY_SEARCH_PROVIDER = "search_provider"
+        const val KEY_BRAVE_KEY = "search_brave_key"
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20

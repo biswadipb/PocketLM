@@ -64,7 +64,10 @@ fun ModelsScreen(
     onModelLoaded: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val models by vm.models.collectAsStateWithLifecycle()
+    val allModels by vm.models.collectAsStateWithLifecycle()
+    val searchModels by vm.embeddingModels.collectAsStateWithLifecycle()
+    // Embedding models are for searching documents, not chatting, so they are listed on their own.
+    val models = remember(allModels, searchModels) { allModels.filter { m -> searchModels.none { it.path == m.path } } }
     val loaded by vm.loadedModel.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
@@ -93,6 +96,7 @@ fun ModelsScreen(
             defaultPresetId = defaultPresetId,
             otherModels = models.filter { it.path != model.path },
             maxThreads = Runtime.getRuntime().availableProcessors(),
+            importAdapter = { uri, done -> vm.importAdapter(uri, model, done) },
             onSave = { vm.setModelSettings(model, it); settingsFor = null },
             onDismiss = { settingsFor = null },
         )
@@ -115,13 +119,31 @@ fun ModelsScreen(
             if (models.isEmpty()) {
                 item { Text("Nothing yet. Download a model below or import a .gguf file.") }
             }
+            if (searchModels.isNotEmpty()) {
+                item { SectionTitle("For searching documents") }
+                items(searchModels, key = { "search-" + it.path }) { m ->
+                    Card(Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(m.fileName.removeSuffix(".gguf"), style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    Formatter.formatShortFileSize(context, m.sizeBytes) +
+                                        " · choose it in Settings, Document search",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            IconButton(onClick = { vm.delete(m) }) { Icon(Icons.Filled.Delete, contentDescription = "Delete ${m.fileName}") }
+                        }
+                    }
+                }
+            }
             items(models, key = { it.path }) { m ->
                 val own = modelSettings[m.fileName]
                 // A draft model sits in memory beside this one, so it counts towards what is needed.
                 val draftBytes = own?.draftFile?.let { name -> models.firstOrNull { it.fileName == name }?.sizeBytes } ?: 0L
                 val fit = MemoryEstimate.estimate(
                     m.sizeBytes + draftBytes, infos[m.path], own?.params?.contextSize ?: gen.contextSize,
-                    memory.availMem, memory.totalMem,
+                    memory.availMem, memory.totalMem, own?.params?.cacheBits ?: gen.cacheBits,
                 )
                 LocalModelCard(
                     model = m,
@@ -152,7 +174,7 @@ fun ModelsScreen(
 
             item { SectionTitle("Download") }
             val levelOf = { c: CatalogModel ->
-                MemoryEstimate.estimate(c.sizeMb * 1024L * 1024L, null, gen.contextSize, memory.availMem, memory.totalMem).level
+                MemoryEstimate.estimate(c.sizeMb * 1024L * 1024L, null, gen.contextSize, memory.availMem, memory.totalMem, gen.cacheBits).level
             }
             val recommended = Recommendation.pick(ModelCatalog.models, levelOf)
             items(ModelCatalog.models, key = { it.fileName }) { c ->

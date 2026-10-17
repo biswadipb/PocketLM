@@ -79,7 +79,27 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.ChatMessage
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketlm.app.PocketViewModel
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.runtime.mutableIntStateOf
+import com.pocketlm.app.data.ChatSearch
+import com.pocketlm.app.data.VoiceLoop
+import com.pocketlm.app.data.ThrottlePolicy
 import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.GenStats
 import com.pocketlm.app.data.Thinking
@@ -96,6 +116,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 fun ChatScreen(
     vm: PocketViewModel,
     onOpenHistory: () -> Unit,
+    showHistoryButton: Boolean = true,
     onOpenModels: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
@@ -105,7 +126,7 @@ fun ChatScreen(
     val generating by vm.generating.collectAsStateWithLifecycle()
     val loading by vm.loading.collectAsStateWithLifecycle()
     val attachments by vm.attachments.collectAsStateWithLifecycle()
-    val pendingImage by vm.pendingImage.collectAsStateWithLifecycle()
+    val pendingImages by vm.pendingImages.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ChatMessage?>(null) }
     val incoming by vm.incomingText.collectAsStateWithLifecycle()
     val askRequests by vm.askRequests.collectAsStateWithLifecycle()
@@ -141,7 +162,48 @@ fun ChatScreen(
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::attach)
     }
+    var searching by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var matchIndex by rememberSaveable { mutableIntStateOf(0) }
+    val noteSuggestions by vm.noteSuggestions.collectAsStateWithLifecycle()
+    val incognito by vm.incognito.collectAsStateWithLifecycle()
+    val notesStatus by vm.notesStatus.collectAsStateWithLifecycle()
+    val useNotes by vm.useNotes.collectAsStateWithLifecycle()
+    val thinking by vm.thinking.collectAsStateWithLifecycle()
+    val thinkingSupported by vm.thinkingSupported.collectAsStateWithLifecycle()
+    val voice by vm.voiceState.collectAsStateWithLifecycle()
+    val voicePartial by vm.voicePartial.collectAsStateWithLifecycle()
+    val microphone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.startVoiceMode()
+        else vm.reportError("The hands-free conversation needs the microphone. You can allow it in the phone's settings.")
+    }
+    // The microphone is only used while the chat is on screen, and the screen stays on during a conversation.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.stopVoiceMode() }
+    val view = LocalView.current
+    val voiceActive = voice.phase != VoiceLoop.Phase.Off
+    DisposableEffect(voiceActive) {
+        view.keepScreenOn = voiceActive
+        onDispose { view.keepScreenOn = false }
+    }
     val listState = rememberLazyListState()
+    val matches = remember(messages, searchQuery, searching) {
+        if (searching) ChatSearch.find(messages.map { it.text }, searchQuery) else emptyList()
+    }
+    val currentMatchNumber = matchIndex.coerceIn(0, (matches.size - 1).coerceAtLeast(0))
+    val currentMatch = matches.getOrNull(currentMatchNumber) ?: -1
+    LaunchedEffect(currentMatch, searchQuery) {
+        if (currentMatch >= 0) listState.animateScrollToItem(currentMatch)
+    }
+    // Opening a starred message from the list scrolls to it.
+    val scrollTarget by vm.scrollTarget.collectAsStateWithLifecycle()
+    LaunchedEffect(scrollTarget, messages.size) {
+        scrollTarget?.let { target ->
+            if (target in messages.indices) {
+                listState.scrollToItem(target)
+                vm.consumeScrollTarget()
+            }
+        }
+    }
 
     LaunchedEffect(askRequests) {
         if (askRequests > 0) runCatching { inputFocus.requestFocus() }
@@ -163,12 +225,19 @@ fun ChatScreen(
             defaultPresetId = defaultPresetId,
             jsonMode = jsonMode,
             jsonSchema = jsonSchema,
+            thinkingSupported = thinkingSupported,
+            thinking = thinking,
+            onThinking = vm::setChatThinking,
+            notesFolder = notesStatus.folderName,
+            useNotes = useNotes,
+            onUseNotes = vm::setUseNotes,
             onModel = vm::switchModel,
             onPreset = vm::setChatPreset,
             onJsonMode = vm::setJsonMode,
             onJsonSchema = vm::setJsonSchema,
             canSummarise = messages.size >= 2 && loaded != null && !generating && !loading,
             onSummarise = { showOptions = false; vm.summariseChat() },
+            onSuggestNotes = { showOptions = false; vm.suggestNotes() },
             onShowPrompt = if (promptRecord == null) null else ({ showOptions = false; showPromptRecord = true }),
             onShareChat = if (messages.isEmpty()) null else ({
                 vm.currentChatMarkdown()?.let { md ->
@@ -180,6 +249,15 @@ fun ChatScreen(
                 }
             }),
             onDismiss = { showOptions = false },
+        )
+    }
+
+    when (val state = noteSuggestions) {
+        PocketViewModel.NoteSuggestionState.Idle, PocketViewModel.NoteSuggestionState.Working -> {}
+        is PocketViewModel.NoteSuggestionState.Ready -> NoteSuggestionsDialog(
+            suggestions = state.suggestions,
+            onAdd = vm::addSuggestedNotes,
+            onDismiss = vm::dismissNoteSuggestions,
         )
     }
 
@@ -225,12 +303,26 @@ fun ChatScreen(
                     IconButton(onClick = vm::newChat, enabled = !generating && !loading) {
                         Icon(Icons.Filled.Refresh, contentDescription = "New chat")
                     }
+                    IconButton(onClick = vm::startIncognitoChat, enabled = !generating && !loading) {
+                        Icon(
+                            Icons.Filled.VisibilityOff,
+                            contentDescription = "New incognito chat",
+                            tint = if (incognito) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                        )
+                    }
+                }
+                if (messages.isNotEmpty()) {
+                    IconButton(onClick = { searching = !searching; if (!searching) searchQuery = "" }) {
+                        Icon(Icons.Filled.Search, contentDescription = "Search this chat")
+                    }
                 }
                 IconButton(onClick = { showOptions = true }) {
                     Icon(Icons.Filled.Tune, contentDescription = "Chat options")
                 }
-                IconButton(onClick = onOpenHistory) {
-                    Icon(Icons.Filled.History, contentDescription = "History")
+                if (showHistoryButton) {
+                    IconButton(onClick = onOpenHistory) {
+                        Icon(Icons.Filled.History, contentDescription = "History")
+                    }
                 }
                 IconButton(onClick = onOpenModels) {
                     Icon(Icons.Filled.Hub, contentDescription = "Models")
@@ -241,7 +333,45 @@ fun ChatScreen(
             },
         )
 
-        attachStatus?.let { status ->
+        if (searching && messages.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it; matchIndex = 0 },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Find in this chat") },
+                    singleLine = true,
+                    trailingIcon = {
+                        Text(
+                            if (searchQuery.isBlank()) "" else if (matches.isEmpty()) "none" else "${currentMatchNumber + 1} of ${matches.size}",
+                            Modifier.padding(end = 8.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    },
+                )
+                IconButton(
+                    onClick = { matchIndex = ChatSearch.step(matchIndex, matches.size, forward = false) },
+                    enabled = matches.size > 1,
+                ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Previous match") }
+                IconButton(
+                    onClick = { matchIndex = ChatSearch.step(matchIndex, matches.size, forward = true) },
+                    enabled = matches.size > 1,
+                ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Next match") }
+                IconButton(onClick = { searching = false; searchQuery = "" }) { Icon(Icons.Filled.Close, contentDescription = "Close search") }
+            }
+        }
+        if (incognito) {
+            Surface(color = MaterialTheme.colorScheme.inverseSurface, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Incognito chat. Nothing here is saved, synced or added to History, and it is erased when you leave it.",
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.inverseOnSurface,
+                )
+            }
+        }
+        val indexStatus by vm.indexStatus.collectAsStateWithLifecycle()
+        (attachStatus ?: indexStatus)?.let { status ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
                 Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                 LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
@@ -257,7 +387,8 @@ fun ChatScreen(
                 )
             }
         }
-        deviceStatus.warning?.let { warning ->
+        val throttle by vm.throttle.collectAsStateWithLifecycle()
+        listOfNotNull(deviceStatus.warning, ThrottlePolicy.note(throttle, deviceStatus)).takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { warning ->
             Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Text(
                     warning,
@@ -319,24 +450,33 @@ fun ChatScreen(
                             onRegenerate = vm::regenerate,
                             canPage = message.id == messages.lastOrNull()?.id && !generating && !loading,
                             onPage = { target -> vm.selectReply(message.id, target) },
+                            highlighted = searching && currentMatch == messages.indexOf(message),
+                            onStar = { vm.toggleStar(message.id) },
                         )
                     }
                 }
             }
         }
 
-        pendingImage?.let { path ->
-            Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                Thumbnail(
-                    path,
-                    Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)),
-                    contentScale = ContentScale.Crop,
-                )
-                IconButton(
-                    onClick = vm::removePendingImage,
-                    modifier = Modifier.align(Alignment.TopEnd).size(24.dp),
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+        if (pendingImages.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                pendingImages.forEach { path ->
+                    Box {
+                        Thumbnail(
+                            path,
+                            Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)),
+                            contentScale = ContentScale.Crop,
+                        )
+                        IconButton(
+                            onClick = { vm.removePendingImage(path) },
+                            modifier = Modifier.align(Alignment.TopEnd).size(24.dp),
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+                        }
+                    }
                 }
             }
         }
@@ -382,7 +522,7 @@ fun ChatScreen(
                 }
             }
         }
-        Row(
+        if (voice.phase != VoiceLoop.Phase.Off) VoicePanel(voice.phase, voicePartial, onEnd = vm::stopVoiceMode) else Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -407,6 +547,16 @@ fun ChatScreen(
             IconButton(onClick = { showPrompts = true }, enabled = !generating && !loading) {
                 Icon(Icons.Filled.Bookmarks, contentDescription = "Saved prompts")
             }
+            IconButton(
+                onClick = {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        vm.startVoiceMode()
+                    } else {
+                        microphone.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                },
+                enabled = loaded != null && !generating && !loading,
+            ) { Icon(Icons.Filled.RecordVoiceOver, contentDescription = "Talk hands-free") }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -438,7 +588,7 @@ fun ChatScreen(
             } else {
                 IconButton(
                     onClick = { vm.send(input); input = "" },
-                    enabled = loaded != null && !loading && (input.isNotBlank() || pendingImage != null),
+                    enabled = loaded != null && !loading && (input.isNotBlank() || pendingImages.isNotEmpty()),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                 }
@@ -460,6 +610,8 @@ private fun MessageBubble(
     onRegenerate: () -> Unit,
     canPage: Boolean,
     onPage: (Int) -> Unit,
+    highlighted: Boolean,
+    onStar: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
@@ -474,17 +626,29 @@ private fun MessageBubble(
         Surface(
             shape = RoundedCornerShape(18.dp),
             color = if (message.isUser) scheme.primaryContainer else scheme.surfaceVariant,
+            border = if (highlighted) BorderStroke(2.dp, scheme.primary) else null,
             modifier = Modifier.fillMaxWidth(0.85f),
         ) {
             if (message.text.isEmpty()) {
                 CircularProgressIndicator(Modifier.padding(14.dp), strokeWidth = 2.dp)
             } else {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    message.imagePath?.let {
-                        Thumbnail(
-                            it,
-                            Modifier.padding(bottom = 8.dp).heightIn(max = 180.dp).clip(RoundedCornerShape(12.dp)),
-                        )
+                    if (message.images.size > 1) {
+                        Row(
+                            Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            message.images.forEach {
+                                Thumbnail(it, Modifier.heightIn(max = 120.dp).widthIn(max = 160.dp).clip(RoundedCornerShape(12.dp)))
+                            }
+                        }
+                    } else {
+                        message.imagePath?.let {
+                            Thumbnail(
+                                it,
+                                Modifier.padding(bottom = 8.dp).heightIn(max = 180.dp).clip(RoundedCornerShape(12.dp)),
+                            )
+                        }
                     }
                     if (message.isUser) {
                         Text(message.text)
@@ -514,6 +678,13 @@ private fun MessageBubble(
                             Icon(
                                 if (speaking) Icons.Filled.Stop else Icons.AutoMirrored.Filled.VolumeUp,
                                 contentDescription = if (speaking) "Stop reading" else "Read aloud",
+                            )
+                        }
+                        IconButton(onClick = onStar) {
+                            Icon(
+                                if (message.starred) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                contentDescription = if (message.starred) "Remove star" else "Star this message",
+                                tint = if (message.starred) scheme.primary else LocalContentColor.current,
                             )
                         }
                         if (canContinue) {
@@ -713,5 +884,70 @@ private fun PromptInspectorDialog(record: PromptRecord, onDismiss: () -> Unit) {
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
         dismissButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(text)) }) { Text("Copy") } },
+    )
+}
+
+/** Shown in place of the message box while a hands-free conversation is going. */
+@Composable
+private fun VoicePanel(phase: VoiceLoop.Phase, partial: String, onEnd: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when (phase) {
+                        VoiceLoop.Phase.Listening -> "Listening…"
+                        VoiceLoop.Phase.Thinking -> "Thinking…"
+                        VoiceLoop.Phase.Speaking -> "Speaking…"
+                        VoiceLoop.Phase.Off -> ""
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Text(
+                    if (phase == VoiceLoop.Phase.Listening && partial.isNotBlank()) partial
+                    else "Say \"stop\" or tap End to finish.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 3,
+                )
+            }
+            Button(onClick = onEnd) { Text("End") }
+        }
+    }
+}
+
+/** Lets the user choose which of the notes the model suggested to keep. */
+@Composable
+private fun NoteSuggestionsDialog(suggestions: List<String>, onAdd: (List<String>) -> Unit, onDismiss: () -> Unit) {
+    var chosen by remember(suggestions) { mutableStateOf(suggestions.toSet()) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (suggestions.isEmpty()) "Nothing to remember" else "Remember these?") },
+        text = {
+            Column {
+                if (suggestions.isEmpty()) {
+                    Text("The model found no lasting facts about you in this chat, or you already have them as notes.")
+                } else {
+                    Text(
+                        "Tick the ones to keep. They are added to every chat's instructions until you remove them in Settings, Memory notes.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    suggestions.forEach { text ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                            androidx.compose.material3.Checkbox(
+                                checked = text in chosen,
+                                onCheckedChange = { on -> chosen = if (on) chosen + text else chosen - text },
+                            )
+                            Text(text, Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (suggestions.isEmpty()) TextButton(onClick = onDismiss) { Text("OK") }
+            else TextButton(onClick = { onAdd(suggestions.filter { it in chosen }) }, enabled = chosen.isNotEmpty()) { Text("Add") }
+        },
+        dismissButton = { if (suggestions.isNotEmpty()) TextButton(onClick = onDismiss) { Text("None") } },
     )
 }

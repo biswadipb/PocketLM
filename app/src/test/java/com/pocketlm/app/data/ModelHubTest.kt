@@ -131,4 +131,24 @@ class ModelHubTest {
             assertTrue(e.message!!.contains("Unexpected Kaggle model id"))
         }
     }
+
+    @Test
+    fun kaggleOffersANextPageUntilTheLastOne() {
+        assertEquals("abc123", KaggleHub.parseNextToken("""{"models":[],"nextPageToken":"abc123","totalResults":58}"""))
+        assertNull(KaggleHub.parseNextToken("""{"models":[],"nextPageToken":"","totalResults":3}"""))
+        assertNull(KaggleHub.parseNextToken("""{"models":[]}"""))
+        assertNull(KaggleHub.parseNextToken("not json"))
+    }
+
+    @Test
+    fun hubsWithoutPagesReturnEverythingAsOnePage() = kotlinx.coroutines.runBlocking {
+        val hub = object : ModelHub {
+            override suspend fun search(query: String) = listOf(HfModel("a/b", 1, 2, "a/b"))
+            override suspend fun files(repoId: String) = emptyList<HfFile>()
+            override fun downloadUrl(repoId: String, path: String) = ""
+        }
+        val page = hub.searchPage("anything", cursor = "ignored")
+        assertEquals(1, page.results.size)
+        assertNull(page.next)
+    }
 }

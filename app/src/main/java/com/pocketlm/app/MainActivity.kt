@@ -2,6 +2,12 @@ package com.pocketlm.app
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.core.content.IntentCompat
+import com.pocketlm.app.data.ShareIntake
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,6 +31,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.pocketlm.app.ui.LockScreen
 import com.pocketlm.app.ui.PocketLmApp
 import com.pocketlm.app.ui.PocketLmTheme
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
@@ -43,7 +50,8 @@ class MainActivity : FragmentActivity() {
         // With the lock on, hide the app in the recent-apps list and block screenshots.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.CREATED) {
-                vm.lockEnabled.collect { enabled ->
+                // An incognito chat is also kept out of the recent-apps list and screenshots.
+                combine(vm.lockEnabled, vm.incognito) { lock, incognito -> lock || incognito }.collect { enabled ->
                     if (enabled) window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
@@ -65,12 +73,17 @@ class MainActivity : FragmentActivity() {
 
         setContent {
             val mode by vm.themeMode.collectAsStateWithLifecycle()
+            val textScale by vm.textScale.collectAsStateWithLifecycle()
             val locked by vm.locked.collectAsStateWithLifecycle()
             LaunchedEffect(locked) { if (locked) promptUnlock() }
-            PocketLmTheme(mode) {
-                // While locked the app is not composed at all, so nothing underneath can be seen,
-                // focused, read by an accessibility service, or tapped.
-                if (locked) LockScreen(onUnlock = ::promptUnlock) else PocketLmApp(vm)
+            // The app's own text size sits on top of the phone's.
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale * textScale)) {
+                PocketLmTheme(mode) {
+                    // While locked the app is not composed at all, so nothing underneath can be seen,
+                    // focused, read by an accessibility service, or tapped.
+                    if (locked) LockScreen(onUnlock = ::promptUnlock) else PocketLmApp(vm)
+                }
             }
         }
     }
@@ -124,13 +137,31 @@ class MainActivity : FragmentActivity() {
 
     /** Text shared from another app, or selected and sent through the text selection menu. */
     private fun handleIntent(intent: Intent?) {
-        val text = when (intent?.action) {
+        if (intent == null) return
+        // Files and photos shared in (a PDF from a mail app, a picture from the gallery) go into a fresh chat.
+        val files: List<Uri> = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> emptyList()
+        }
+        if (files.isNotEmpty()) {
+            vm.receiveFiles(files)
+            return
+        }
+        val text = when (intent.action) {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
             else -> null
         }
-        if (!text.isNullOrBlank()) vm.receiveText(text)
-        if (intent?.action == IntentActions.ASK) vm.requestAsk()
+        if (!text.isNullOrBlank()) {
+            // A shared link is read as a page; anything else goes into the message box.
+            when (val plan = if (intent.action == Intent.ACTION_SEND) ShareIntake.classifyText(text) else ShareIntake.TextPlan.Message(text)) {
+                is ShareIntake.TextPlan.Page -> vm.receiveLink(plan.url)
+                is ShareIntake.TextPlan.Message -> vm.receiveText(plan.text)
+            }
+        }
+        if (intent.action == IntentActions.ASK) vm.requestAsk()
     }
 
     private companion object {

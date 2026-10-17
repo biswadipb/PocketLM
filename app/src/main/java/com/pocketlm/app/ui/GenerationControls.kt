@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -50,6 +52,24 @@ fun GenerationControls(params: GenerationParams, maxThreads: Int, onChange: (Gen
             steps = CONTEXT_SIZES.size - 2,
             onChange = { onChange(params.copy(contextSize = CONTEXT_SIZES[it.roundToInt()])) },
         )
+        Column {
+            Text("Memory cache", style = MaterialTheme.typography.bodyLarge)
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(16 to "Normal", 8 to "Compact (8-bit)", 4 to "Smallest (4-bit)").forEach { (bits, label) ->
+                    FilterChip(
+                        selected = params.cacheBits == bits,
+                        onClick = { onChange(params.copy(cacheBits = bits)) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            Text(
+                "How the model's memory of the chat is stored. Compact roughly halves the memory it takes with almost no loss, " +
+                    "so a longer context or a bigger model fits; smallest takes a quarter with a small loss. Applies when a model loads.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         SettingSlider(
             label = "Top-k",
             value = params.topK.toFloat(),

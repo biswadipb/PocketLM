@@ -14,6 +14,32 @@ data class CatalogModel(
 
 /** Small instruct models that run comfortably on a phone (all Q4_K_M quantised). */
 object ModelCatalog {
+
+    /** Embedding models for searching documents by meaning. They are not chat models and are chosen in Settings. */
+    val embeddings = listOf(
+        CatalogModel(
+            name = "BGE Small English v1.5",
+            description = "Tiny and quick. English documents.",
+            fileName = "bge-small-en-v1.5-q8_0.gguf",
+            url = "https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf",
+            sizeMb = 35,
+        ),
+        CatalogModel(
+            name = "Nomic Embed Text v1.5",
+            description = "Better matches and longer passages. English documents.",
+            fileName = "nomic-embed-text-v1.5.Q4_K_M.gguf",
+            url = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf",
+            sizeMb = 80,
+        ),
+        CatalogModel(
+            name = "BGE M3 (many languages)",
+            description = "For documents in other languages, or mixed. Larger.",
+            fileName = "bge-m3-Q4_K_M.gguf",
+            url = "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf",
+            sizeMb = 418,
+        ),
+    )
+
     val models = listOf(
         CatalogModel(
             name = "Qwen2.5 0.5B Instruct",

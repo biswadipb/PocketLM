@@ -51,6 +51,9 @@ static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
 static mtmd_context                     * g_mtmd = nullptr;
 static int                                g_n_threads = 4;
+static std::vector<llama_adapter_lora *>  g_lora;       // LoRA adapters attached to the loaded model
+static std::vector<float>                 g_lora_scale;
+static int                                g_base_threads = 4; // what was chosen when the context was made; scaled down when the phone runs hot
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -86,7 +89,18 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstr
     return 0;
 }
 
-static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT_CONTEXT_SIZE, const int requested_threads = 0) {
+static bool g_cache_fell_back = false;   // a compressed memory cache was asked for but could not be used
+
+static ggml_type cache_type_for_bits(int bits) {
+    switch (bits) {
+        case 8:  return GGML_TYPE_Q8_0;
+        case 4:  return GGML_TYPE_Q4_0;
+        default: return GGML_TYPE_F16;
+    }
+}
+
+static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT_CONTEXT_SIZE, const int requested_threads = 0,
+                                   const int cache_bits = 16) {
     if (!model) {
         LOGe("%s: model cannot be null", __func__);
         return nullptr;
@@ -99,6 +113,7 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
             : std::max(N_THREADS_MIN, std::min(N_THREADS_MAX, n_cores - N_THREADS_HEADROOM));
     LOGi("%s: Using %d threads", __func__, n_threads);
     g_n_threads = n_threads;
+    g_base_threads = n_threads;
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
@@ -112,7 +127,22 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+    g_cache_fell_back = false;
+    if (cache_bits == 8 || cache_bits == 4) {
+        // A compressed value cache needs flash attention.
+        ctx_params.type_k = cache_type_for_bits(cache_bits);
+        ctx_params.type_v = cache_type_for_bits(cache_bits);
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    }
     auto *context = llama_init_from_model(g_model, ctx_params);
+    if (context == nullptr && (cache_bits == 8 || cache_bits == 4)) {
+        LOGw("%s: a %d-bit memory cache did not work here, using the normal one", __func__, cache_bits);
+        ctx_params.type_k = GGML_TYPE_F16;
+        ctx_params.type_v = GGML_TYPE_F16;
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        g_cache_fell_back = true;
+        context = llama_init_from_model(g_model, ctx_params);
+    }
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
     }
@@ -149,8 +179,8 @@ extern "C"
 JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
         JNIEnv * /*env*/, jobject /*unused*/, jint n_ctx, jint n_threads, jfloat temp, jfloat top_p,
-        jint top_k, jfloat min_p, jfloat repeat_penalty, jint seed) {
-    auto *context = init_context(g_model, n_ctx, n_threads);
+        jint top_k, jfloat min_p, jfloat repeat_penalty, jint seed, jint cache_bits) {
+    auto *context = init_context(g_model, n_ctx, n_threads, cache_bits);
     if (!context) { return 1; }
     g_context = context;
     g_n_ctx = (int) llama_n_ctx(context);
@@ -161,6 +191,13 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
     g_grammar.clear();
     g_sampler = new_sampler();
     return 0;
+}
+
+/** True if a compressed memory cache was asked for at the last load but the normal one is used instead. */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_cacheFellBack(JNIEnv * /*env*/, jobject /*unused*/) {
+    return g_cache_fell_back;
 }
 
 /**
@@ -453,6 +490,26 @@ static void shift_context() {
     LOGi("%s: Context shifting done! Current position: %d", __func__, current_position);
 }
 
+// Reasoning models write a <think> section first. When the user switches that off, the answer is started for the
+// model with an empty one, which is what such models' own templates do for "no thinking".
+static bool g_skip_thinking = false;
+
+static bool ends_with(const std::string &text, const char *suffix) {
+    const size_t n = strlen(suffix);
+    return text.size() >= n && text.compare(text.size() - n, n, suffix) == 0;
+}
+
+static void skip_thinking_if_asked(std::string &formatted_prompt) {
+    if (!g_skip_thinking) { return; }
+    if (ends_with(formatted_prompt, "<think>\n")) {
+        formatted_prompt += "\n</think>\n\n";   // the template already opened the section
+    } else if (ends_with(formatted_prompt, "<think>")) {
+        formatted_prompt += "\n\n</think>\n\n";
+    } else {
+        formatted_prompt += "<think>\n\n</think>\n\n";
+    }
+}
+
 static std::string chat_add_and_format(const std::string &role, const std::string &content) {
     common_chat_msg new_msg;
     new_msg.role = role;
@@ -618,6 +675,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
     if (has_chat_template) {
         formatted_user_prompt = chat_add_and_format(ROLE_USER, user_prompt);
+        skip_thinking_if_asked(formatted_user_prompt);
     }
     env->ReleaseStringUTFChars(juser_prompt, user_prompt);
     g_last_prompt = formatted_user_prompt;
@@ -679,45 +737,71 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_loadProjector(JNIEnv *env, jobj
     return 0;
 }
 
+constexpr jsize MAX_IMAGES_PER_PROMPT = 8;
+
+/** Sends a message together with one or more images. Returns 0 on success, 1 without a vision add-on, 2 if an image cannot be read. */
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
+Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImages(
         JNIEnv *env,
         jobject /*unused*/,
         jstring juser_prompt,
-        jstring jimage_path,
+        jobjectArray jimage_paths,
         jint n_predict
 ) {
     reset_short_term_states();
     if (!g_mtmd) { return 1; }
+    const jsize n_images = env->GetArrayLength(jimage_paths);
+    if (n_images < 1 || n_images > MAX_IMAGES_PER_PROMPT) { return 2; }
 
+    // One marker per image, in order, before the words.
     const auto *const user_prompt = env->GetStringUTFChars(juser_prompt, nullptr);
-    const std::string content = std::string(mtmd_get_marker(g_mtmd)) + "\n" + user_prompt;
+    std::string content;
+    for (jsize i = 0; i < n_images; i++) {
+        content += mtmd_get_marker(g_mtmd);
+        content += "\n";
+    }
+    content += user_prompt;
     env->ReleaseStringUTFChars(juser_prompt, user_prompt);
 
     const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
-    const std::string formatted = has_chat_template ? chat_add_and_format(ROLE_USER, content) : content;
+    std::string formatted = has_chat_template ? chat_add_and_format(ROLE_USER, content) : content;
+    if (has_chat_template) { skip_thinking_if_asked(formatted); }
     g_last_prompt = formatted;
 
-    const auto *const image_path = env->GetStringUTFChars(jimage_path, nullptr);
-    mtmd_helper_bitmap_wrapper wrapper =
-            mtmd_helper_bitmap_init_from_file(g_mtmd, image_path, false, mtmd_helper_init_opt_default());
-    env->ReleaseStringUTFChars(jimage_path, image_path);
-    if (!wrapper.bitmap) {
-        LOGe("%s: could not decode the image", __func__);
-        return 2;
+    std::vector<mtmd_helper_bitmap_wrapper> wrappers;
+    const auto free_images = [&wrappers]() {
+        for (auto &w : wrappers) {
+            if (w.bitmap) { mtmd_bitmap_free(w.bitmap); }
+            if (w.video_ctx) { mtmd_helper_video_free(w.video_ctx); }
+        }
+    };
+    for (jsize i = 0; i < n_images; i++) {
+        auto *const jpath = (jstring) env->GetObjectArrayElement(jimage_paths, i);
+        const auto *const image_path = env->GetStringUTFChars(jpath, nullptr);
+        mtmd_helper_bitmap_wrapper wrapper =
+                mtmd_helper_bitmap_init_from_file(g_mtmd, image_path, false, mtmd_helper_init_opt_default());
+        env->ReleaseStringUTFChars(jpath, image_path);
+        env->DeleteLocalRef(jpath);
+        if (!wrapper.bitmap) {
+            LOGe("%s: could not decode image %d", __func__, (int) i + 1);
+            free_images();
+            return 2;
+        }
+        wrappers.push_back(wrapper);
     }
 
     mtmd_input_text text{formatted.c_str(), formatted.size(), current_position == 0, true};
-    const mtmd_bitmap *bitmaps[1] = {wrapper.bitmap};
+    std::vector<const mtmd_bitmap *> bitmaps;
+    for (const auto &w : wrappers) { bitmaps.push_back(w.bitmap); }
     mtmd_input_chunks *chunks = mtmd_input_chunks_init();
 
     int result = 0;
-    if (mtmd_tokenize(g_mtmd, chunks, &text, bitmaps, 1) != 0) {
+    if (mtmd_tokenize(g_mtmd, chunks, &text, bitmaps.data(), bitmaps.size()) != 0) {
         LOGe("%s: mtmd_tokenize failed", __func__);
         result = 3;
     } else if (current_position + (llama_pos) mtmd_helper_get_n_tokens(chunks) >= g_n_ctx - OVERFLOW_HEADROOM) {
-        LOGe("%s: image does not fit in the remaining context", __func__);
+        LOGe("%s: the images do not fit in the remaining context", __func__);
         result = 4;
     } else {
         llama_pos new_position = current_position;
@@ -733,8 +817,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPromptWithImage(
     }
 
     mtmd_input_chunks_free(chunks);
-    mtmd_bitmap_free(wrapper.bitmap);
-    if (wrapper.video_ctx) { mtmd_helper_video_free(wrapper.video_ctx); }
+    free_images();
     return result;
 }
 
@@ -1025,6 +1108,77 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_attachDraft(JNIEnv *env, jobjec
     return 0;
 }
 
+/** True if the loaded model's own chat template is one for a model that thinks before it answers. */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeSupportsThinking(JNIEnv * /*env*/, jobject /*unused*/) {
+    if (!g_model) { return false; }
+    const char *tmpl = llama_model_chat_template(g_model, nullptr);
+    return tmpl && (strstr(tmpl, "enable_thinking") != nullptr || strstr(tmpl, "<think>") != nullptr);
+}
+
+/** Switches the model's thinking section on or off for further messages; ignored for models that do not think. */
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_nativeSetThinking(JNIEnv * /*env*/, jobject /*unused*/, jboolean enabled) {
+    bool thinks = false;
+    if (g_model) {
+        const char *tmpl = llama_model_chat_template(g_model, nullptr);
+        thinks = tmpl && (strstr(tmpl, "enable_thinking") != nullptr || strstr(tmpl, "<think>") != nullptr);
+    }
+    g_skip_thinking = thinks && !enabled;
+}
+
+/**
+ * Reads a LoRA adapter file and keeps it ready for applyLoras(). Call after prepare(). The adapter has to be made
+ * for the loaded model. Returns 0, 1 if no model is loaded, or 2 if the adapter could not be used.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_attachLora(JNIEnv *env, jobject /*unused*/, jstring jpath, jfloat scale) {
+    if (!g_model || !g_context) { return 1; }
+    const auto *path = env->GetStringUTFChars(jpath, 0);
+    llama_adapter_lora *adapter = nullptr;
+    try {
+        adapter = llama_adapter_lora_init(g_model, path);
+    } catch (...) {
+        adapter = nullptr;
+    }
+    LOGi("%s: %s %s", __func__, path, adapter ? "attached" : "FAILED");
+    env->ReleaseStringUTFChars(jpath, path);
+    if (!adapter) { return 2; }
+    g_lora.push_back(adapter);
+    g_lora_scale.push_back(scale);
+    return 0;
+}
+
+/** Switches on all the adapters read with attachLora(). Returns 0, or 3 if they could not be applied. */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_applyLoras(JNIEnv * /*env*/, jobject /*unused*/) {
+    if (!g_context) { return 1; }
+    if (g_lora.empty()) { return 0; }
+    const int32_t result = llama_set_adapters_lora(g_context, g_lora.data(), g_lora.size(), g_lora_scale.data());
+    return result == 0 ? 0 : 3;
+}
+
+/**
+ * Runs with [percent] of the threads chosen at load (at least one), for the main model and the draft model.
+ * Takes effect with the next decode. 100 puts the original count back.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_scaleThreads(JNIEnv * /*env*/, jobject /*unused*/, jint percent) {
+    if (!g_context) { return 1; }
+    const int share = std::max(10, std::min(100, (int) percent));
+    const int threads = std::max(1, (g_base_threads * share + 50) / 100);
+    g_n_threads = threads;
+    llama_set_n_threads(g_context, threads, threads);
+    if (g_draft_ctx) { llama_set_n_threads(g_draft_ctx, threads, threads); }
+    LOGi("%s: Using %d of %d threads", __func__, threads, g_base_threads);
+    return 0;
+}
+
 /** How many of the draft model's guesses were right, for the prompt inspector. */
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -1264,6 +1418,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     reset_short_term_states();
 
     // Free up resources
+    g_lora.clear();          // the adapters themselves are freed along with the model
+    g_lora_scale.clear();
     free_draft();
     if (g_mtmd) {
         mtmd_free(g_mtmd);

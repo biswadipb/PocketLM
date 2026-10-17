@@ -65,6 +65,25 @@ interface InferenceEngine {
      */
     suspend fun restoreState(pathPrefix: String, tag: String): Boolean
 
+    /** True if the memory cache is compressed as asked, false if the normal one had to be used. Valid after [loadModel]. */
+    fun cacheAsRequested(): Boolean
+
+    /** True if the loaded model writes a thinking section before its answer (Qwen3, DeepSeek R1 and similar). */
+    fun supportsThinking(): Boolean
+
+    /**
+     * Lets a model that thinks write its thinking section ([enabled]) or start straight on its answer. Applies to
+     * further messages and is kept for models loaded afterwards; models that do not think ignore it.
+     */
+    suspend fun setThinking(enabled: Boolean)
+
+    /**
+     * Runs with [percent] of the threads chosen when the model loaded (100 for all of them), for example to
+     * let a hot phone cool down. Takes effect with the next decode, even in the middle of a reply, and is kept
+     * for models loaded afterwards.
+     */
+    suspend fun setThreadShare(percent: Int)
+
     /**
      * Changes the temperature and top-p for further replies without reloading the model. Call between messages.
      */
@@ -81,6 +100,11 @@ interface InferenceEngine {
      * Returns false if the schema could not be used. Call between messages.
      */
     suspend fun setOutputSchema(jsonSchema: String): Boolean
+
+    /**
+     * Empty when no adapters were asked for; otherwise says which could not be used. Valid after [loadModel].
+     */
+    fun adapterStatus(): String
 
     /**
      * Empty when no draft model was asked for; otherwise one line saying that speculative decoding is on
@@ -101,6 +125,13 @@ interface InferenceEngine {
     fun sendUserPromptWithImage(
         message: String,
         imagePath: String,
+        predictLength: Int = DEFAULT_PREDICT_LENGTH,
+    ): Flow<String> = sendUserPromptWithImages(message, listOf(imagePath), predictLength)
+
+    /** Like [sendUserPromptWithImage], with several images (in the order given) before the message. */
+    fun sendUserPromptWithImages(
+        message: String,
+        imagePaths: List<String>,
         predictLength: Int = DEFAULT_PREDICT_LENGTH,
     ): Flow<String>
 
@@ -166,7 +197,14 @@ data class GenerationParams(
     val chatTemplate: String = "",
     /** Path of a small model that drafts tokens for the main one (speculative decoding); empty for none. */
     val draftModelPath: String = "",
+    /** LoRA adapters (small fine-tune files made for this model) to apply on top of it. */
+    val adapters: List<LoraAdapter> = emptyList(),
+    /** How many bits each number in the model's memory of the chat takes: 16 (normal), 8 or 4 (less memory). */
+    val cacheBits: Int = 16,
 )
+
+/** A LoRA adapter file and how strongly it is applied: 1.0 is as trained, 0 is off. */
+data class LoraAdapter(val path: String, val scale: Float = 1f)
 
 val State.isUninterruptible
     get() = this is State.Initializing ||

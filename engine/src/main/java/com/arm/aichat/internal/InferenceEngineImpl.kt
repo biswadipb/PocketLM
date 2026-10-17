@@ -92,7 +92,7 @@ internal class InferenceEngineImpl private constructor(
     @FastNative
     private external fun prepare(
         nCtx: Int, nThreads: Int, temp: Float, topP: Float,
-        topK: Int, minP: Float, repeatPenalty: Float, seed: Int,
+        topK: Int, minP: Float, repeatPenalty: Float, seed: Int, cacheBits: Int,
     ): Int
 
     @FastNative
@@ -106,6 +106,18 @@ internal class InferenceEngineImpl private constructor(
     private external fun attachDraft(path: String): Int
 
     private external fun draftSummary(): String
+
+    private external fun scaleThreads(percent: Int): Int
+
+    private external fun cacheFellBack(): Boolean
+
+    private external fun nativeSupportsThinking(): Boolean
+
+    private external fun nativeSetThinking(enabled: Boolean)
+
+    private external fun attachLora(path: String, scale: Float): Int
+
+    private external fun applyLoras(): Int
 
     @FastNative
     private external fun setSampling(temperature: Float, topP: Float): Int
@@ -130,7 +142,7 @@ internal class InferenceEngineImpl private constructor(
     private external fun loadProjector(path: String): Int
 
     @FastNative
-    private external fun processUserPromptWithImage(prompt: String, imagePath: String, nPredict: Int): Int
+    private external fun processUserPromptWithImages(prompt: String, imagePaths: Array<String>, nPredict: Int): Int
 
     @FastNative
     private external fun systemInfo(): String
@@ -160,6 +172,7 @@ internal class InferenceEngineImpl private constructor(
     private var _readyForSystemPrompt = false
     private var draftWanted = false
     private var draftProblem = ""
+    private var adapterProblem = ""
     @Volatile
     private var _cancelGeneration = false
 
@@ -216,7 +229,7 @@ internal class InferenceEngineImpl private constructor(
                 }
                 prepare(
                     params.contextSize, params.threads, params.temperature, params.topP,
-                    params.topK, params.minP, params.repeatPenalty, params.seed,
+                    params.topK, params.minP, params.repeatPenalty, params.seed, params.cacheBits,
                 ).let {
                     if (it != 0) throw IOException("Failed to prepare resources")
                 }
@@ -226,6 +239,15 @@ internal class InferenceEngineImpl private constructor(
                 if (params.chatTemplate.isNotBlank()) {
                     val result = applyChatTemplate(params.chatTemplate)
                     if (result != 0) Log.w(TAG, "Chat template '${params.chatTemplate}' not used, code $result")
+                }
+                adapterProblem = ""
+                if (params.adapters.isNotEmpty()) {
+                    val failed = params.adapters.filter { attachLora(it.path, it.scale) != 0 }
+                        .map { File(it.path).name.removeSuffix(".gguf") }
+                    if (applyLoras() != 0) adapterProblem = "The adapters could not be applied."
+                    else if (failed.isNotEmpty()) {
+                        adapterProblem = "Not used because they do not fit this model: " + failed.joinToString(", ") + "."
+                    }
                 }
                 draftProblem = ""
                 draftWanted = params.draftModelPath.isNotBlank()
@@ -238,6 +260,9 @@ internal class InferenceEngineImpl private constructor(
                         else -> "The draft model could not be set up."
                     }
                 }
+
+                if (threadShare != 100) scaleThreads(threadShare)
+                nativeSetThinking(thinkingOn)
 
                 _cancelGeneration = false
                 _state.value = InferenceEngine.State.ModelReady
@@ -287,13 +312,15 @@ internal class InferenceEngineImpl private constructor(
         return generateReply(::textPromptProblem) { processUserPrompt(message, predictLength) }
     }
 
-    override fun sendUserPromptWithImage(
+    override fun sendUserPromptWithImages(
         message: String,
-        imagePath: String,
+        imagePaths: List<String>,
         predictLength: Int,
     ): Flow<String> {
-        require(File(imagePath).isFile) { "Image not found" }
-        return generateReply(::imagePromptProblem) { processUserPromptWithImage(message, imagePath, predictLength) }
+        require(imagePaths.isNotEmpty()) { "No image to send" }
+        require(imagePaths.all { File(it).isFile }) { "Image not found" }
+        val paths = imagePaths.toTypedArray()
+        return generateReply(::imagePromptProblem) { processUserPromptWithImages(message, paths, predictLength) }
     }
 
     override suspend fun resetConversation(systemPrompt: String) {
@@ -356,6 +383,34 @@ internal class InferenceEngineImpl private constructor(
             }
         }
 
+    @Volatile
+    private var threadShare = 100
+
+    @Volatile
+    private var thinkingOn = true
+
+    override fun cacheAsRequested(): Boolean = !(_state.value.isModelLoaded && cacheFellBack())
+
+    override fun supportsThinking(): Boolean = _state.value.isModelLoaded && nativeSupportsThinking()
+
+    override suspend fun setThinking(enabled: Boolean) {
+        thinkingOn = enabled
+        withContext(llamaDispatcher) {
+            if (_state.value.isModelLoaded) nativeSetThinking(enabled)
+        }
+    }
+
+    override suspend fun setThreadShare(percent: Int) {
+        val share = percent.coerceIn(10, 100)
+        threadShare = share
+        withContext(llamaDispatcher) {
+            if (_state.value.isModelLoaded) {
+                val result = scaleThreads(share)
+                if (result != 0) Log.w(TAG, "Could not change the thread count, code $result")
+            }
+        }
+    }
+
     override suspend fun updateSampling(temperature: Float, topP: Float) {
         withContext(llamaDispatcher) {
             check(_state.value is InferenceEngine.State.ModelReady) { "Load a model first" }
@@ -380,6 +435,8 @@ internal class InferenceEngineImpl private constructor(
             result == 0
         }
 
+    override fun adapterStatus(): String = if (_state.value.isModelLoaded) adapterProblem else ""
+
     override fun draftStatus(): String = when {
         !draftWanted || !_state.value.isModelLoaded -> ""
         draftProblem.isNotEmpty() -> draftProblem
@@ -400,9 +457,9 @@ internal class InferenceEngineImpl private constructor(
 
     private fun imagePromptProblem(code: Int) = when (code) {
         1 -> "This model has no vision add-on loaded."
-        2 -> "The image could not be read."
+        2 -> "An image could not be read."
         3 -> "The image could not be prepared for this model."
-        4 -> "The image does not fit in what is left of the conversation. Start a new chat or raise the context length in Settings."
+        4 -> "The images do not fit in what is left of the conversation. Start a new chat, send fewer images, or raise the context length in Settings."
         else -> "The model could not read that image (error $code)."
     }
 

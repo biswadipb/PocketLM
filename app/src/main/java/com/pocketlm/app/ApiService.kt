@@ -15,6 +15,8 @@ import com.pocketlm.app.data.ApiException
 import com.pocketlm.app.data.ApiServer
 import com.pocketlm.app.data.ChatRequest
 import com.pocketlm.app.data.LocalNetwork
+import com.pocketlm.app.data.TlsStore
+import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /** What the API server is doing right now, shown in Settings. */
 sealed interface ApiStatus {
     data object Stopped : ApiStatus
-    data class Running(val port: Int) : ApiStatus
+    data class Running(val port: Int, val https: Boolean = false) : ApiStatus
     data class Failed(val message: String) : ApiStatus
 }
 
@@ -57,19 +59,30 @@ class ApiService : Service() {
 
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val port = prefs.getInt(KEY_PORT, DEFAULT_PORT)
+        val https = prefs.getBoolean(KEY_HTTPS, false)
         ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, notification(port), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            this, NOTIFICATION_ID, notification(port, https), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
 
         server?.stop()
+        val tls = if (https) {
+            try {
+                TlsStore.serverContext(TlsStore(File(filesDir, TLS_DIR)).identity(LocalNetwork.addresses()))
+            } catch (e: Exception) {
+                ApiGateway.set(ApiStatus.Failed("Could not set up HTTPS: ${e.message}"))
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        } else null
         server = ApiServer(
             port = port,
             apiKey = { getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_API_KEY, null) },
             backend = { ApiGateway.backend ?: NotReady },
+            tls = tls,
         )
         try {
             server?.start()
-            ApiGateway.set(ApiStatus.Running(port))
+            ApiGateway.set(ApiStatus.Running(port, https))
         } catch (e: Exception) {
             ApiGateway.set(ApiStatus.Failed("Could not start on port $port: ${e.message}"))
             stopSelf()
@@ -77,13 +90,13 @@ class ApiService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun notification(port: Int): android.app.Notification {
+    private fun notification(port: Int, https: Boolean): android.app.Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(
             this, 2, Intent(this, ApiService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val address = LocalNetwork.addresses().firstOrNull()?.let { "http://$it:$port/v1" } ?: "port $port"
+        val address = LocalNetwork.addresses().firstOrNull()?.let { "${if (https) "https" else "http"}://$it:$port/v1" } ?: "port $port"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_tile)
             .setContentTitle("PocketLM API server is on")
@@ -112,6 +125,8 @@ class ApiService : Service() {
         const val PREFS = "settings"
         const val KEY_PORT = "api_port"
         const val KEY_API_KEY = "api_key"
+        const val KEY_HTTPS = "api_https"
+        const val TLS_DIR = "tls"
         const val DEFAULT_PORT = 8080
         private const val ACTION_STOP = "com.pocketlm.app.STOP_API"
         private const val CHANNEL_ID = "api"

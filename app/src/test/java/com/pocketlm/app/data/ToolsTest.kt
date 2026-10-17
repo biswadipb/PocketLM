@@ -165,9 +165,13 @@ class ToolsTest {
     @Test
     fun webSearchNeedsAServerAndSaysSoClearly() = runBlocking {
         val all = ToolId.entries.toSet()
-        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, searchServer = null).modelText.contains("no search server"))
-        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, searchServer = "  ").modelText.contains("no search server"))
-        assertTrue(Tools.run(ToolCall("websearch", "x"), setOf(ToolId.Calculator), searchServer = "https://s.example").modelText.contains("not available"))
+        val searx = SearchConfig(SearchProvider.SearXNG)
+        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, search = searx).modelText.contains("no search server"))
+        assertTrue(Tools.run(ToolCall("websearch", "kotlin"), all, search = searx.copy(searxServer = "  ")).modelText.contains("no search server"))
+        assertTrue(
+            Tools.run(ToolCall("websearch", "x"), setOf(ToolId.Calculator), search = searx.copy(searxServer = "https://s.example"))
+                .modelText.contains("not available"),
+        )
     }
 
     @Test

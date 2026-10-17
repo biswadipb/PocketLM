@@ -35,8 +35,9 @@ class BackupManager(private val chatsDir: File, private val imagesDir: File, pri
                 zip.put("chats/${file.name}", text.toByteArray())
                 chatCount++
                 chat.optJSONArray("messages")?.let { msgs ->
-                    for (i in 0 until msgs.length()) msgs.optJSONObject(i)?.optString("image")?.takeIf { it.isNotEmpty() }
-                        ?.let { images += File(it).name }
+                    for (i in 0 until msgs.length()) {
+                        msgs.optJSONObject(i)?.let { m -> MessageImages.paths(m).forEach { images += File(it).name } }
+                    }
                 }
                 chat.optJSONArray("attachments")?.let { atts ->
                     for (i in 0 until atts.length()) atts.optJSONObject(i)?.optString("id")?.takeIf { it.isNotEmpty() }
@@ -115,8 +116,7 @@ class BackupManager(private val chatsDir: File, private val imagesDir: File, pri
         chat.optJSONArray("messages")?.let { msgs ->
             for (i in 0 until msgs.length()) {
                 val m = msgs.optJSONObject(i) ?: continue
-                val path = m.optString("image")
-                if (path.isNotEmpty()) m.put("image", File(imagesDir, File(path).name).absolutePath)
+                MessageImages.rewrite(m) { File(imagesDir, File(it).name).absolutePath }
             }
         }
         return chat

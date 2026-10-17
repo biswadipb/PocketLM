@@ -22,7 +22,8 @@ object ChatExport {
                     return@forEach
                 }
                 append(if (m.isUser) "## You\n\n" else "## PocketLM\n\n")
-                if (m.imagePath != null) append("_[Photo attached]_\n\n")
+                if (m.images.size > 1) append("_[${m.images.size} photos attached]_\n\n")
+                else if (m.imagePath != null) append("_[Photo attached]_\n\n")
                 val parts = Thinking.split(m.text)
                 if (!m.isUser && parts.thinking != null) {
                     append("<details>\n<summary>Thought process</summary>\n\n").append(parts.thinking).append("\n\n</details>\n\n")

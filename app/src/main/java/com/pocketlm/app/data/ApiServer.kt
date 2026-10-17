@@ -14,11 +14,20 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.SSLContext
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 
-data class ApiMessage(val role: String, val content: String)
+data class ApiMessage(
+    val role: String,
+    val content: String,
+    /** Function calls the assistant made in this message (a later `tool` message answers each). */
+    val toolCalls: List<ApiToolCall> = emptyList(),
+    /** For a `tool` message: which call it answers. */
+    val toolCallId: String? = null,
+)
 
 /**
  * One request to answer. [temperature] and [topP] are null unless the caller chose them; [stop] are
@@ -35,15 +44,28 @@ data class ChatRequest(
     val jsonSchema: String? = null,
     /** True for `response_format` of type `json_object`: any valid JSON. */
     val jsonObject: Boolean = false,
-)
+    /** Functions the model may ask the caller to run (OpenAI `tools`). */
+    val tools: List<ApiTool> = emptyList(),
+    val toolChoice: ToolChoice = ToolChoice.Auto,
+) {
+    /** True if the model should be offered the functions and its answer read for calls to them. */
+    val usesTools: Boolean get() = ApiTools.active(tools, toolChoice)
+}
 
 /** An error with the HTTP status the client should see. */
 class ApiException(val status: Int, message: String) : Exception(message)
+
+/** Vectors made for the inputs of an embeddings request, one per input, in order. */
+class EmbeddingsResult(val vectors: List<FloatArray>, val model: String, val tokens: Int)
 
 /** The part of the app the server calls to get a reply. */
 interface ApiBackend {
     /** Models to list, the loaded one first. */
     fun modelNames(): List<String>
+
+    /** Turns each of [inputs] into an embedding vector. Fails with an [ApiException] if there is no embedding model. */
+    suspend fun embed(inputs: List<String>): EmbeddingsResult =
+        throw ApiException(503, "No embedding model is selected. Choose one in PocketLM, Settings, Document search.")
 
     /** Writes a reply, passing each piece to [onToken]. Returns how many pieces were produced. */
     suspend fun complete(request: ChatRequest, onToken: (String) -> Unit): Int
@@ -58,6 +80,8 @@ class ApiServer(
     private val apiKey: () -> String?,
     private val backend: () -> ApiBackend?,
     maxConnections: Int = MAX_CONNECTIONS,
+    /** When set, the server speaks HTTPS using this context instead of plain HTTP. */
+    private val tls: SSLContext? = null,
 ) {
     private val permits = Semaphore(maxConnections)
     private var serverSocket: ServerSocket? = null
@@ -65,7 +89,13 @@ class ApiServer(
 
     /** Starts listening and returns the port in use (useful when [port] is 0). */
     fun start(): Int {
-        val socket = ServerSocket(port, 16, null as InetAddress?)
+        val socket = if (tls == null) {
+            ServerSocket(port, 16, null as InetAddress?)
+        } else {
+            (tls.serverSocketFactory.createServerSocket(port, 16, null as InetAddress?) as SSLServerSocket).apply {
+                enabledProtocols = supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
+            }
+        }
         serverSocket = socket
         pool.execute {
             while (!socket.isClosed) {
@@ -150,6 +180,7 @@ class ApiServer(
                 })
                 writeJson(out, 200, JSONObject().put("object", "list").put("data", data))
             }
+            request.method == "POST" && request.path == "/v1/embeddings" -> embeddings(request.body, out)
             request.method == "POST" && request.path == "/v1/chat/completions" -> respond(parseChat(request.body), out, completion = false)
             request.method == "POST" && request.path == "/v1/completions" -> respond(parseCompletion(request.body), out, completion = true)
             else -> throw ApiException(404, "Unknown endpoint ${request.method} ${request.path}")
@@ -202,6 +233,58 @@ class ApiServer(
 
         fun finishReason() =
             if (!filter.finished && request.maxTokens != null && count >= request.maxTokens) "length" else "stop"
+
+        // With functions on offer the whole answer is read first, as a call to one is only clear once it is complete.
+        if (!completion && request.usesTools) {
+            val written = StringBuilder()
+            generate { written.append(it) }
+            val parsed = ApiTools.parseReply(written.toString(), request.tools)
+            val reason = if (parsed.calls.isNotEmpty()) "tool_calls" else finishReason()
+            fun callJson(call: ApiToolCall) = JSONObject().put("id", call.id).put("type", "function")
+                .put("function", JSONObject().put("name", call.name).put("arguments", call.argumentsJson))
+
+            if (!request.stream) {
+                val message = JSONObject().put("role", "assistant").put("content", parsed.content ?: JSONObject.NULL)
+                if (parsed.calls.isNotEmpty()) message.put("tool_calls", JSONArray(parsed.calls.map(::callJson)))
+                val usage = JSONObject().put("prompt_tokens", 0).put("completion_tokens", count).put("total_tokens", count)
+                writeJson(
+                    out, 200,
+                    JSONObject().put("id", id).put("object", "chat.completion").put("created", created).put("model", model)
+                        .put("choices", JSONArray().put(JSONObject().put("index", 0).put("message", message).put("finish_reason", reason)))
+                        .put("usage", usage),
+                )
+                return
+            }
+            writeHead(out, 200, "OK", "text/event-stream", extra = "Cache-Control: no-cache\r\n")
+            fun send(delta: JSONObject, finish: String?) {
+                val choice = JSONObject().put("index", 0).put("delta", delta).put("finish_reason", finish ?: JSONObject.NULL)
+                val json = JSONObject().put("id", id).put("object", "chat.completion.chunk").put("created", created)
+                    .put("model", model).put("choices", JSONArray().put(choice))
+                try {
+                    out.write(("data: $json\n\n").toByteArray())
+                    out.flush()
+                } catch (e: IOException) {
+                    throw ClientGone()
+                }
+            }
+            send(JSONObject().put("role", "assistant").put("content", ""), null)
+            parsed.content?.let { send(JSONObject().put("content", it), null) }
+            parsed.calls.forEachIndexed { index, call ->
+                val head = JSONObject().put("index", index).put("id", call.id).put("type", "function")
+                    .put("function", JSONObject().put("name", call.name).put("arguments", ""))
+                send(JSONObject().put("tool_calls", JSONArray().put(head)), null)
+                val body = JSONObject().put("index", index).put("function", JSONObject().put("arguments", call.argumentsJson))
+                send(JSONObject().put("tool_calls", JSONArray().put(body)), null)
+            }
+            send(JSONObject(), reason)
+            try {
+                out.write("data: [DONE]\n\n".toByteArray())
+                out.flush()
+            } catch (e: IOException) {
+                // Already finished; ignore.
+            }
+            return
+        }
 
         if (!request.stream) {
             val text = StringBuilder()
@@ -303,6 +386,42 @@ class ApiServer(
         }
     }
 
+    /** `POST /v1/embeddings`: one vector per input, as a list of numbers or (as the OpenAI libraries ask) base64. */
+    private fun embeddings(body: ByteArray, out: OutputStream) {
+        val json = parseJson(body)
+        val inputs: List<String> = when (val input = json.opt("input")) {
+            is String -> listOf(input)
+            is JSONArray -> List(input.length()) { i ->
+                input.opt(i) as? String ?: throw ApiException(400, "'input' must be text, or a list of texts. Token lists are not supported.")
+            }
+            else -> throw ApiException(400, "'input' is required")
+        }
+        if (inputs.isEmpty()) throw ApiException(400, "'input' is empty")
+        if (inputs.size > MAX_EMBEDDING_INPUTS) throw ApiException(400, "At most $MAX_EMBEDDING_INPUTS inputs per request")
+        if (inputs.any { it.length > MAX_EMBEDDING_CHARS }) throw ApiException(400, "An input is longer than $MAX_EMBEDDING_CHARS characters")
+        val format = json.optString("encoding_format", "float")
+        if (format != "float" && format != "base64") throw ApiException(400, "'encoding_format' must be \"float\" or \"base64\"")
+
+        val backend = backend() ?: throw ApiException(503, "PocketLM is not ready")
+        val result = runBlocking { backend.embed(inputs) }
+        val data = JSONArray()
+        result.vectors.forEachIndexed { index, vector ->
+            val embedding: Any = if (format == "base64") {
+                val bytes = java.nio.ByteBuffer.allocate(vector.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                vector.forEach { bytes.putFloat(it) }
+                java.util.Base64.getEncoder().encodeToString(bytes.array())
+            } else {
+                JSONArray(vector.map { it.toDouble() })
+            }
+            data.put(JSONObject().put("object", "embedding").put("index", index).put("embedding", embedding))
+        }
+        writeJson(
+            out, 200,
+            JSONObject().put("object", "list").put("data", data).put("model", result.model)
+                .put("usage", JSONObject().put("prompt_tokens", result.tokens).put("total_tokens", result.tokens)),
+        )
+    }
+
     private fun parseJson(body: ByteArray): JSONObject = try {
         JSONObject(body.toString(Charsets.UTF_8))
     } catch (e: JSONException) {
@@ -314,7 +433,11 @@ class ApiServer(
         val array = json.optJSONArray("messages") ?: throw ApiException(400, "'messages' is required")
         val messages = List(array.length()) { i ->
             val m = array.optJSONObject(i) ?: throw ApiException(400, "Each message must be an object")
-            ApiMessage(m.optString("role", "user"), contentText(m.opt("content")))
+            ApiMessage(
+                m.optString("role", "user"), contentText(m.opt("content")),
+                toolCalls = ApiTools.parseToolCalls(m.optJSONArray("tool_calls")),
+                toolCallId = m.optString("tool_call_id").ifEmpty { null },
+            )
         }
         if (messages.none { it.role == "user" }) throw ApiException(400, "'messages' needs at least one user message")
         return withOptions(json, messages)
@@ -345,8 +468,11 @@ class ApiServer(
         if (schema != null) {
             JsonSchema.problem(schema)?.let { throw ApiException(400, "response_format: $it") }
         }
+        val tools = ApiTools.parseTools(json.optJSONArray("tools"))
         return ChatRequest(
             messages = messages,
+            tools = tools,
+            toolChoice = ApiTools.parseChoice(json.opt("tool_choice"), tools),
             stream = json.optBoolean("stream", false),
             maxTokens = maxTokens,
             temperature = (json.opt("temperature") as? Number)?.toFloat()?.coerceIn(0f, 2f),
@@ -406,5 +532,7 @@ class ApiServer(
         const val MAX_HEADERS = 64
         const val MAX_CONNECTIONS = 16
         const val MAX_STOP_SEQUENCES = 4
+        const val MAX_EMBEDDING_INPUTS = 128
+        const val MAX_EMBEDDING_CHARS = 32_000
     }
 }

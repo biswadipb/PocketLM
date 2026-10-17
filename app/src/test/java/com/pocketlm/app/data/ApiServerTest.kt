@@ -3,6 +3,7 @@ package com.pocketlm.app.data
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -15,11 +16,19 @@ class ApiServerTest {
         var last: ChatRequest? = null
         var failWith: ApiException? = null
         override fun modelNames() = listOf("fake-model.gguf")
+        var embedded: List<String>? = null
+        var tokens = listOf("Hel", "lo", " there")
+        var embedWorks = true
+        override suspend fun embed(inputs: List<String>): EmbeddingsResult {
+            if (!embedWorks) return super.embed(inputs)
+            embedded = inputs
+            return EmbeddingsResult(inputs.mapIndexed { i, t -> floatArrayOf(i + 1f, t.length.toFloat(), 0.5f) }, "fake-embed", inputs.sumOf { it.length })
+        }
         override suspend fun complete(request: ChatRequest, onToken: (String) -> Unit): Int {
             last = request
             failWith?.let { throw it }
-            listOf("Hel", "lo", " there").forEach(onToken)
-            return 3
+            tokens.forEach(onToken)
+            return tokens.size
         }
     }
 
@@ -220,5 +229,142 @@ class ApiServerTest {
         val r = call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"hi"}]}""")
         assertEquals(503, r.status)
         assertEquals("busy", JSONObject(r.body).getJSONObject("error").getString("message"))
+    }
+
+    // ---- Embeddings -----------------------------------------------------------------
+
+    @Test
+    fun embeddingsReturnsOneVectorPerInput() {
+        val reply = call("POST", "/v1/embeddings", """{"input":["hello","a longer text"],"model":"x"}""")
+        assertEquals(200, reply.status)
+        val json = JSONObject(reply.body)
+        assertEquals("list", json.getString("object"))
+        assertEquals("fake-embed", json.getString("model"))
+        val data = json.getJSONArray("data")
+        assertEquals(2, data.length())
+        assertEquals(1, data.getJSONObject(1).getInt("index") )
+        assertEquals("embedding", data.getJSONObject(0).getString("object"))
+        val vector = data.getJSONObject(1).getJSONArray("embedding")
+        assertEquals(3, vector.length())
+        assertEquals(2.0, vector.getDouble(0), 1e-6)
+        assertEquals("a longer text".length.toDouble(), vector.getDouble(1), 1e-6)
+        assertEquals(listOf("hello", "a longer text"), backend.embedded)
+        assertEquals("hello".length + "a longer text".length, json.getJSONObject("usage").getInt("total_tokens"))
+    }
+
+    @Test
+    fun aSingleStringInputIsAccepted() {
+        val reply = call("POST", "/v1/embeddings", """{"input":"just one"}""")
+        assertEquals(200, reply.status)
+        assertEquals(1, JSONObject(reply.body).getJSONArray("data").length())
+    }
+
+    @Test
+    fun base64VectorsDecodeToTheSameNumbers() {
+        val reply = call("POST", "/v1/embeddings", """{"input":"hello","encoding_format":"base64"}""")
+        val text = JSONObject(reply.body).getJSONArray("data").getJSONObject(0).getString("embedding")
+        val bytes = java.nio.ByteBuffer.wrap(java.util.Base64.getDecoder().decode(text)).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        assertEquals(1f, bytes.float, 0f)
+        assertEquals(5f, bytes.float, 0f)
+        assertEquals(0.5f, bytes.float, 0f)
+    }
+
+    @Test
+    fun embeddingsNeedsTheKeyLikeEverythingElse() {
+        assertEquals(401, call("POST", "/v1/embeddings", """{"input":"x"}""", auth = null).status)
+    }
+
+    @Test
+    fun badEmbeddingRequestsGetClearErrors() {
+        assertEquals(400, call("POST", "/v1/embeddings", "{}").status)
+        assertEquals(400, call("POST", "/v1/embeddings", """{"input":[]}""").status)
+        assertEquals(400, call("POST", "/v1/embeddings", """{"input":[[1,2,3]]}""").status)
+        assertEquals(400, call("POST", "/v1/embeddings", """{"input":"x","encoding_format":"binary"}""").status)
+        assertEquals(400, call("POST", "/v1/embeddings", "not json").status)
+        val tooMany = (1..129).joinToString(",") { "\"t$it\"" }
+        assertEquals(400, call("POST", "/v1/embeddings", """{"input":[$tooMany]}""").status)
+    }
+
+    @Test
+    fun withoutAnEmbeddingModelTheClientIsToldWhatToDo() {
+        backend.embedWorks = false
+        val reply = call("POST", "/v1/embeddings", """{"input":"x"}""")
+        assertEquals(503, reply.status)
+        assertTrue(reply.body, reply.body.contains("No embedding model"))
+    }
+
+    // ---- Tool calls -------------------------------------------------------------------
+
+    private val weatherTool = """[{"type":"function","function":{"name":"get_weather","description":"Weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]"""
+    private val callText = listOf("Let me check. <tool_call>", "{\"name\":\"get_weather\",", "\"arguments\":{\"city\":\"Pune\"}}", "</tool_call>")
+
+    @Test
+    fun theModelAsksForAFunctionAndTheCallerGetsToolCalls() {
+        backend.tokens = callText
+        val reply = call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"Weather in Pune?"}],"tools":$weatherTool}""")
+        assertEquals(200, reply.status)
+        val choice = JSONObject(reply.body).getJSONArray("choices").getJSONObject(0)
+        assertEquals("tool_calls", choice.getString("finish_reason"))
+        val message = choice.getJSONObject("message")
+        assertEquals("Let me check.", message.getString("content"))
+        val toolCall = message.getJSONArray("tool_calls").getJSONObject(0)
+        assertEquals("function", toolCall.getString("type"))
+        assertTrue(toolCall.getString("id").startsWith("call_"))
+        assertEquals("get_weather", toolCall.getJSONObject("function").getString("name"))
+        assertEquals("Pune", JSONObject(toolCall.getJSONObject("function").getString("arguments")).getString("city"))
+        assertEquals(1, backend.last!!.tools.size)
+    }
+
+    @Test
+    fun anAnswerWithoutACallIsAnOrdinaryReplyEvenWhenFunctionsWereOffered() {
+        val reply = call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"Hi"}],"tools":$weatherTool}""")
+        val choice = JSONObject(reply.body).getJSONArray("choices").getJSONObject(0)
+        assertEquals("stop", choice.getString("finish_reason"))
+        assertEquals("Hello there", choice.getJSONObject("message").getString("content"))
+        assertFalse(choice.getJSONObject("message").has("tool_calls"))
+    }
+
+    @Test
+    fun streamedToolCallsArriveAsDeltasThenTheFinishReason() {
+        backend.tokens = callText
+        val reply = call("POST", "/v1/chat/completions", """{"stream":true,"messages":[{"role":"user","content":"Weather?"}],"tools":$weatherTool}""")
+        val chunks = reply.body.lines().filter { it.startsWith("data: {") }.map { JSONObject(it.removePrefix("data: ")) }
+        val deltas = chunks.map { it.getJSONArray("choices").getJSONObject(0) }
+        assertEquals("assistant", deltas.first().getJSONObject("delta").getString("role"))
+        val calls = deltas.mapNotNull { it.getJSONObject("delta").optJSONArray("tool_calls") }
+        assertEquals("get_weather", calls.first().getJSONObject(0).getJSONObject("function").getString("name"))
+        val arguments = calls.drop(1).joinToString("") { it.getJSONObject(0).getJSONObject("function").getString("arguments") }
+        assertEquals("Pune", JSONObject(arguments).getString("city"))
+        assertEquals("tool_calls", deltas.last().getString("finish_reason"))
+        assertTrue(reply.body.trimEnd().endsWith("data: [DONE]"))
+    }
+
+    @Test
+    fun toolChoiceNoneKeepsFunctionsOutOfIt() {
+        backend.tokens = callText
+        val reply = call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"x"}],"tools":$weatherTool,"tool_choice":"none"}""")
+        val message = JSONObject(reply.body).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+        assertFalse(message.has("tool_calls"))
+        assertTrue(message.getString("content").contains("<tool_call>"))
+        assertFalse(backend.last!!.usesTools)
+    }
+
+    @Test
+    fun aToolConversationReachesTheModelWithItsResults() {
+        val body = """{"messages":[
+            {"role":"user","content":"Weather in Pune?"},
+            {"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Pune\"}"}}]},
+            {"role":"tool","tool_call_id":"call_9","content":"31 degrees"}],"tools":$weatherTool}"""
+        assertEquals(200, call("POST", "/v1/chat/completions", body).status)
+        val messages = backend.last!!.messages
+        assertEquals(listOf("user", "assistant", "tool"), messages.map { it.role })
+        assertEquals("call_9", messages[1].toolCalls.single().id)
+        assertEquals("call_9", messages[2].toolCallId)
+    }
+
+    @Test
+    fun badToolsAreRefusedBeforeAnythingRuns() {
+        assertEquals(400, call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"x"}],"tools":[{"type":"function"}]}""").status)
+        assertEquals(400, call("POST", "/v1/chat/completions", """{"messages":[{"role":"user","content":"x"}],"tools":$weatherTool,"tool_choice":"maybe"}""").status)
     }
 }

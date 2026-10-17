@@ -40,18 +40,31 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.FolderBackend
 import com.pocketlm.app.data.SyncKind
+import com.pocketlm.app.data.SyncSchedule
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.FilterChip
 import com.pocketlm.app.data.SyncTarget
 
 /** The Settings section for keeping chats in step between a person's devices. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SyncSection(vm: PocketViewModel) {
     val status by vm.syncStatus.collectAsStateWithLifecycle()
     var setup by remember { mutableStateOf(false) }
     var confirmDisconnect by remember { mutableStateOf(false) }
+    var changingPassphrase by remember { mutableStateOf(false) }
+    var enteringNewPassphrase by remember { mutableStateOf(false) }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
     if (setup) {
         SyncSetupDialog(vm = vm, onDismiss = { setup = false })
+    }
+    if (changingPassphrase) {
+        ChangePassphraseDialog(vm = vm, onDismiss = { changingPassphrase = false })
+    }
+    if (enteringNewPassphrase) {
+        NewPassphraseDialog(vm = vm, onDismiss = { enteringNewPassphrase = false })
     }
     if (confirmDisconnect) {
         AlertDialog(
@@ -96,6 +109,9 @@ internal fun SyncSection(vm: PocketViewModel) {
     status.lastError?.let {
         Text("Last attempt failed: $it", Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }
+    if (status.passphraseChanged) {
+        Button(onClick = { enteringNewPassphrase = true }, Modifier.padding(top = 4.dp)) { Text("Enter the new passphrase") }
+    }
 
     Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = vm::syncNow, enabled = !status.running) { Text(if (status.running) "Syncing…" else "Sync now") }
@@ -116,6 +132,23 @@ internal fun SyncSection(vm: PocketViewModel) {
         status.wifiOnly,
         vm::setSyncWifiOnly,
     )
+    if (status.autoSync) {
+        Text("Look for changes from other devices while the app is closed", Modifier.padding(top = 12.dp))
+        Text(
+            "Android decides the exact time, and waits for a good network and enough battery.",
+            style = MaterialTheme.typography.bodySmall,
+            color = muted,
+        )
+        FlowRow(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SyncSchedule.choices.forEach { minutes ->
+                FilterChip(
+                    selected = status.backgroundMinutes == minutes,
+                    onClick = { vm.setSyncBackgroundMinutes(minutes) },
+                    label = { Text(SyncSchedule.label(minutes)) },
+                )
+            }
+        }
+    }
     SyncSwitch(
         "Also sync settings",
         "Generation settings, system prompts, saved prompts and memory notes. Not the API key, app lock, downloaded models " +
@@ -123,7 +156,10 @@ internal fun SyncSection(vm: PocketViewModel) {
         status.syncSettings,
         vm::setSyncSettings,
     )
-    TextButton(onClick = { confirmDisconnect = true }) { Text("Turn off sync") }
+    Row {
+        TextButton(onClick = { changingPassphrase = true }, enabled = !status.running) { Text("Change passphrase") }
+        TextButton(onClick = { confirmDisconnect = true }) { Text("Turn off sync") }
+    }
 }
 
 @Composable
@@ -277,5 +313,83 @@ private fun Field(
         visualTransformation = if (secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else keyboard),
         modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+@Composable
+private fun ChangePassphraseDialog(vm: PocketViewModel, onDismiss: () -> Unit) {
+    val status by vm.syncStatus.collectAsStateWithLifecycle()
+    var current by remember { mutableStateOf("") }
+    var new by remember { mutableStateOf("") }
+    var repeat by remember { mutableStateOf("") }
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(status.running, status.connectError) {
+        if (started && !status.running && status.connectError == null) onDismiss()
+    }
+    AlertDialog(
+        onDismissRequest = { if (!status.running) onDismiss() },
+        title = { Text("Change passphrase") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Everything at the sync location is locked again with the new passphrase. This phone sends it all afresh, so it " +
+                        "needs a connection and may take a while. Your other devices keep their chats and ask for the new passphrase " +
+                        "the next time they sync. Use this if you think the old passphrase is known to someone else.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Field("Current passphrase", current, { current = it }, secret = true)
+                Field("New passphrase", new, { new = it }, secret = true)
+                Field("Repeat new passphrase", repeat, { repeat = it }, secret = true)
+                status.connectError?.takeIf { !status.running }?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                }
+                if (status.running) {
+                    Text(status.progress.ifEmpty { "Working…" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !status.running && current.isNotEmpty() && new.isNotEmpty(),
+                onClick = { started = true; vm.changeSyncPassphrase(current, new, repeat) },
+            ) { Text("Change") }
+        },
+        dismissButton = { TextButton(enabled = !status.running, onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun NewPassphraseDialog(vm: PocketViewModel, onDismiss: () -> Unit) {
+    val status by vm.syncStatus.collectAsStateWithLifecycle()
+    var passphrase by remember { mutableStateOf("") }
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(status.running, status.passphraseChanged) {
+        if (started && !status.running && !status.passphraseChanged) onDismiss()
+    }
+    AlertDialog(
+        onDismissRequest = { if (!status.running) onDismiss() },
+        title = { Text("Enter the new passphrase") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "The passphrase was changed on another device. Your chats here are kept and sync again once you enter it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Field("New passphrase", passphrase, { passphrase = it }, secret = true)
+                status.connectError?.takeIf { !status.running }?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                }
+                if (status.running) Text(status.progress.ifEmpty { "Working…" }, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !status.running && passphrase.isNotEmpty(),
+                onClick = { started = true; vm.rejoinSync(passphrase) },
+            ) { Text("Continue") }
+        },
+        dismissButton = { TextButton(enabled = !status.running, onClick = onDismiss) { Text("Cancel") } },
     )
 }

@@ -31,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -139,7 +140,7 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                             installedNames = (installed + projectors).map { it.fileName }.toSet(),
                             fitFor = { file ->
                                 if (file.isProjector) null
-                                else MemoryEstimate.estimate(file.sizeBytes, null, gen.contextSize, memory.availMem, memory.totalMem)
+                                else MemoryEstimate.estimate(file.sizeBytes, null, gen.contextSize, memory.availMem, memory.totalMem, gen.cacheBits)
                             },
                             onToggle = {
                                 expanded = if (open) null else model.id
@@ -148,6 +149,15 @@ fun SearchScreen(vm: PocketViewModel, onBack: () -> Unit, modifier: Modifier = M
                             onDownload = { vm.downloadFromHub(model.id, it) },
                             onCancel = vm::cancelDownload,
                         )
+                    }
+                    if (state.next != null) {
+                        item(key = "more-results") {
+                            OutlinedButton(
+                                onClick = vm::loadMoreResults,
+                                enabled = !state.loadingMore,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(if (state.loadingMore) "Loading…" else "Load more results") }
+                        }
                     }
                 }
             }

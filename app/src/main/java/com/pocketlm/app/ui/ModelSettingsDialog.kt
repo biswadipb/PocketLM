@@ -1,7 +1,17 @@
 package com.pocketlm.app.ui
 
 import android.text.format.Formatter
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Slider
+import com.pocketlm.app.data.AdapterSetting
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +56,7 @@ fun ModelSettingsDialog(
     defaultPresetId: String,
     otherModels: List<LocalModel>,
     maxThreads: Int,
+    importAdapter: (Uri, (name: String?, problem: String?) -> Unit) -> Unit,
     onSave: (ModelSettings?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -55,6 +66,23 @@ fun ModelSettingsDialog(
     var presetId by remember { mutableStateOf(current?.presetId) }
     var template by remember { mutableStateOf(current?.chatTemplate.orEmpty()) }
     var draft by remember { mutableStateOf(current?.draftFile) }
+    var adapters by remember { mutableStateOf(current?.adapters.orEmpty()) }
+    var adapterProblem by remember { mutableStateOf<String?>(null) }
+    var importing by remember { mutableStateOf(false) }
+    val adapterPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            importing = true
+            importAdapter(uri) { name, problem ->
+                importing = false
+                if (name != null) {
+                    adapters = adapters.filterNot { it.file == name } + AdapterSetting(name, 1f)
+                    adapterProblem = null
+                } else {
+                    adapterProblem = problem
+                }
+            }
+        }
+    }
     // A draft model has to be smaller than the model it helps.
     val drafts = remember(otherModels, model) { otherModels.filter { it.sizeBytes < model.sizeBytes }.sortedBy { it.sizeBytes } }
 
@@ -99,6 +127,41 @@ fun ModelSettingsDialog(
                     onPick = { template = it.orEmpty() },
                 )
 
+                Heading("Adapters (LoRA)")
+                Text(
+                    "Small fine-tune files made for this exact model, for a style, a language or a task. They are applied on top of the " +
+                        "model when it loads, so a change here needs the model loaded again. A strength of 1 is as trained; lower " +
+                        "blends it in more gently.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                adapters.forEach { adapter ->
+                    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            adapter.file.removeSuffix(".gguf"),
+                            Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text("strength " + "%.2f".format(adapter.scale), style = MaterialTheme.typography.labelMedium)
+                        IconButton(onClick = { adapters = adapters.filterNot { it.file == adapter.file } }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Remove ${adapter.file}")
+                        }
+                    }
+                    Slider(
+                        value = adapter.scale,
+                        onValueChange = { v -> adapters = adapters.map { if (it.file == adapter.file) it.copy(scale = (v * 20).roundToInt() / 20f) else it } },
+                        valueRange = AdapterSetting.MIN_SCALE..AdapterSetting.MAX_SCALE,
+                    )
+                }
+                OutlinedButton(onClick = { adapterPicker.launch(arrayOf("*/*")) }, enabled = !importing, modifier = Modifier.padding(top = 4.dp)) {
+                    Text(if (importing) "Checking the file…" else "Add an adapter file")
+                }
+                adapterProblem?.let {
+                    Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+
                 Heading("Draft model (experimental)")
                 Text(
                     "A smaller model of the same family guesses ahead and this one checks the guesses, which can make replies " +
@@ -131,8 +194,13 @@ fun ModelSettingsDialog(
                     presetId = presetId,
                     chatTemplate = template,
                     draftFile = draft,
+                    adapters = adapters,
                 )
-                onSave(result.takeIf { it.params != null || it.presetId != null || it.chatTemplate.isNotEmpty() || it.draftFile != null })
+                onSave(
+                    result.takeIf {
+                        it.params != null || it.presetId != null || it.chatTemplate.isNotEmpty() || it.draftFile != null || it.adapters.isNotEmpty()
+                    },
+                )
             }) { Text("Save") }
         },
         dismissButton = {

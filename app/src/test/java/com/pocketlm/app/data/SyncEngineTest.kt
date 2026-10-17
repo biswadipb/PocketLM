@@ -391,8 +391,8 @@ class SyncEngineTest {
         try {
             b.engine(k = wrong.second, h = wrong.first).run()
             fail("a different passphrase should not sync")
-        } catch (e: SyncException) {
-            assertTrue(e.message!!, e.message!!.contains("different passphrase"))
+        } catch (e: SyncPassphraseChangedException) {
+            assertTrue(e.message!!, e.message!!.contains("passphrase"))
         }
         assertTrue(b.ids().isEmpty())
         assertEquals(0L, b.state.get().lastSyncAt)
