@@ -11,6 +11,7 @@ import com.pocketlm.app.data.ApiMessage
 import com.pocketlm.app.data.AppLog
 import com.pocketlm.app.data.Bm25Index
 import com.pocketlm.app.data.ChatRequest
+import com.pocketlm.app.data.ChatStore
 import com.pocketlm.app.data.HeadlessModels
 import com.pocketlm.app.data.HeadlessParams
 import com.pocketlm.app.data.KnowledgeStore
@@ -23,10 +24,19 @@ import com.pocketlm.app.data.NotesScanner
 import com.pocketlm.app.data.NotesUse
 import com.pocketlm.app.data.PromptJob
 import com.pocketlm.app.data.Presets
+import com.pocketlm.app.data.SearchConfig
+import com.pocketlm.app.data.SearchProvider
 import com.pocketlm.app.data.SettingKeys
+import com.pocketlm.app.data.Skills
 import com.pocketlm.app.data.SourceRef
 import com.pocketlm.app.data.SpeechModels
 import com.pocketlm.app.data.Thinking
+import com.pocketlm.app.data.ToolCall
+import com.pocketlm.app.data.ToolContext
+import com.pocketlm.app.data.ToolId
+import com.pocketlm.app.data.ToolLoop
+import com.pocketlm.app.data.ToolOutcome
+import com.pocketlm.app.data.Tools
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
@@ -109,9 +119,12 @@ class PromptRunner(private val context: Context) {
             is NotesStep.Stop -> return notes.result
             is NotesStep.Use -> notes
         }
-        val system = systemFor(job)
+        val skills = Skills.fromJson(prefs.getString(Skills.KEY, null))
+        val tools = if (job.tools) ToolLoop.allowed(Tools.active(Tools.parseEnabled(prefs.getString(SettingKeys.TOOLS, null)), skills)) else emptySet()
+        val system = Tools.withInstructions(systemFor(job), tools, skills)
+        val runTool = toolRunner(step.prompt, tools, skills)
 
-        return when (val written = viaApp(job, system, step.prompt) ?: viaEngine(job, system, step.prompt)) {
+        return when (val written = viaApp(job, system, step.prompt, tools, runTool) ?: viaEngine(job, system, step.prompt, tools, runTool)) {
             is Generated.Failed -> PromptResult.Failed(written.message)
             is Generated.Text -> {
                 val reply = Thinking.answerOnly(written.text).trim()
@@ -175,31 +188,86 @@ class PromptRunner(private val context: Context) {
         }
     }
 
-    /** Through the open app, if it has a model loaded. Null when it has not (or is not open), so the caller loads one itself. */
-    private suspend fun viaApp(job: PromptJob, system: String, prompt: String): Generated? {
-        val backend = ApiGateway.backend ?: return null
-        val request = ChatRequest(
-            messages = listOf(ApiMessage("system", system), ApiMessage("user", prompt)),
-            stream = false,
-            maxTokens = job.maxTokens,
+    /** Runs the tools a scheduled prompt asks for. Addresses a page may be opened from are the prompt's and web search results. */
+    private suspend fun toolRunner(prompt: String, tools: Set<ToolId>, skills: List<com.pocketlm.app.data.Skill>): suspend (ToolCall) -> ToolOutcome {
+        if (tools.isEmpty()) return { ToolOutcome("No tools are available.", "none") }
+        val seen = StringBuilder(prompt)
+        val chats = if (ToolId.ChatHistory in tools) ChatStore(context).list() else emptyList()
+        val toolContext = ToolContext(seenText = { seen.toString() }, chats = { chats }, skills = { skills })
+        val server = prefs.getString(SettingKeys.SEARCH_SERVER, "") ?: ""
+        val search = SearchConfig(
+            SearchProvider.initial(prefs.getString(SettingKeys.SEARCH_PROVIDER, null), server),
+            server,
+            prefs.getString(SettingKeys.SEARCH_BRAVE_KEY, "") ?: "",
         )
-        repeat(BUSY_TRIES) {
-            try {
-                val out = StringBuilder()
-                backend.complete(request) { out.append(it) }
-                return Generated.Text(out.toString(), backend.modelNames().firstOrNull())
-            } catch (e: ApiException) {
-                when {
-                    e.status != 503 -> return Generated.Failed(e.message ?: "The app could not answer.")
-                    e.message.orEmpty().contains("No model is loaded") -> return null
-                    else -> delay(BUSY_WAIT_MS) // the chat is busy; try again shortly
-                }
+        val wiki = WikiLibrary.get(context).lookup()
+        return { call ->
+            Tools.run(call, tools, search = search, offlineWiki = wiki, context = toolContext).also {
+                if (call.name == ToolId.WebSearch.id) seen.append('\n').append(it.modelText)
             }
         }
-        return Generated.Failed("PocketLM was busy with a chat. Try again later.")
     }
 
-    private suspend fun viaEngine(job: PromptJob, system: String, prompt: String): Generated {
+    private class AppFailed(message: String) : Exception(message)
+    private class AppHasNoModel : Exception()
+    private class ToolRequestEnd : RuntimeException()
+
+    /** What the model wrote, up to the end of a tool request, with any thinking section left out. */
+    private fun cutAtTool(text: String): String {
+        val answer = Thinking.answerOnly(text)
+        val end = answer.indexOf(Tools.CLOSE_TAG)
+        return if (end >= 0) answer.substring(0, end) else answer
+    }
+
+    /** Through the open app, if it has a model loaded. Null when it has not (or is not open), so the caller loads one itself. */
+    private suspend fun viaApp(
+        job: PromptJob,
+        system: String,
+        prompt: String,
+        tools: Set<ToolId>,
+        runTool: suspend (ToolCall) -> ToolOutcome,
+    ): Generated? {
+        val backend = ApiGateway.backend ?: return null
+        val messages = mutableListOf(ApiMessage("system", system))
+        val stop = if (tools.isEmpty()) emptyList() else listOf(Tools.CLOSE_TAG)
+        return try {
+            val result = ToolLoop.run(prompt, tools, runTool = runTool, ask = { text ->
+                messages += ApiMessage("user", text)
+                val request = ChatRequest(messages = messages.toList(), stream = false, maxTokens = job.maxTokens, stop = stop)
+                var written: String? = null
+                repeat(BUSY_TRIES) {
+                    if (written != null) return@repeat
+                    try {
+                        val out = StringBuilder()
+                        backend.complete(request) { out.append(it) }
+                        written = out.toString()
+                    } catch (e: ApiException) {
+                        when {
+                            e.status != 503 -> throw AppFailed(e.message ?: "The app could not answer.")
+                            e.message.orEmpty().contains("No model is loaded") -> throw AppHasNoModel()
+                            else -> delay(BUSY_WAIT_MS) // the chat is busy; try again shortly
+                        }
+                    }
+                }
+                val reply = written ?: throw AppFailed("PocketLM was busy with a chat. Try again later.")
+                messages += ApiMessage("assistant", reply)
+                cutAtTool(reply)
+            })
+            Generated.Text(result.text, backend.modelNames().firstOrNull())
+        } catch (e: AppHasNoModel) {
+            null
+        } catch (e: AppFailed) {
+            Generated.Failed(e.message ?: "The app could not answer.")
+        }
+    }
+
+    private suspend fun viaEngine(
+        job: PromptJob,
+        system: String,
+        prompt: String,
+        tools: Set<ToolId>,
+        runTool: suspend (ToolCall) -> ToolOutcome,
+    ): Generated {
         val models = ModelStore(context).list().filterNot { SpeechModels.isSpeechFile(it.fileName) }
         val choice = HeadlessModels.pick(
             job.model, preferred = null, last = prefs.getString(LAST_MODEL, null),
@@ -220,9 +288,20 @@ class PromptRunner(private val context: Context) {
             engine.loadModel(model.path, params)
             if (engine.supportsThinking()) engine.setThinking(false)
             engine.setSystemPrompt(system)
-            val out = StringBuilder()
-            engine.sendUserPrompt(prompt, job.maxTokens).collect { out.append(it) }
-            return Generated.Text(out.toString(), model.fileName.removeSuffix(".gguf"))
+            val result = ToolLoop.run(prompt, tools, runTool = runTool, ask = { text ->
+                val out = StringBuilder()
+                try {
+                    engine.sendUserPrompt(text, job.maxTokens).collect {
+                        out.append(it)
+                        // A tool request ends the turn: the tool is run and the model is asked again.
+                        if (tools.isNotEmpty() && out.contains(Tools.CLOSE_TAG)) throw ToolRequestEnd()
+                    }
+                } catch (e: ToolRequestEnd) {
+                    // Expected: stopping the model at the end of its request.
+                }
+                cutAtTool(out.toString())
+            })
+            return Generated.Text(result.text, model.fileName.removeSuffix(".gguf"))
         } finally {
             // Whatever happened, give the memory back.
             withContext(NonCancellable) { runCatching { if (engine.state.value.isModelLoaded) engine.cleanUp() } }

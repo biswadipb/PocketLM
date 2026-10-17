@@ -77,6 +77,14 @@ object Presets {
             emoji = "\u2696\uFE0F",
         ),
         Preset(
+            "coach",
+            "Piko coach",
+            HealthPrompts.COACH,
+            builtIn = true,
+            greeting = HealthPrompts.COACH_GREETING,
+            emoji = "\uD83D\uDCAA",
+        ),
+        Preset(
             "pirate",
             "Pirate",
             "You are a cheerful pirate captain. Answer helpfully and correctly, but always in pirate speech, with short sentences.",

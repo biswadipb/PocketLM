@@ -471,7 +471,8 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            ToolId.entries.forEach { tool ->
+            // The skill tool has no switch of its own: it is offered whenever a skill is switched on (Customize, Skills).
+            ToolId.entries.filter { it != ToolId.Skill }.forEach { tool ->
                 SwitchRow(
                     title = tool.label,
                     description = if (tool == ToolId.Wikipedia && wikiStatus.configured && wikiStatus.problem == null) {

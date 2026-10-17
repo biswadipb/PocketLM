@@ -25,7 +25,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Starred, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
+private enum class Screen { Chat, History, Starred, Scheduled, Customize, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
 
 private val HISTORY_PANE_WIDTH = 360.dp
 
@@ -55,7 +55,7 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
     BackHandler(enabled = screen != Screen.Chat) {
         screen = when (screen) {
             Screen.Search -> Screen.Models
-            Screen.Starred -> Screen.History
+            Screen.Starred, Screen.Scheduled, Screen.Customize -> Screen.History
             Screen.Benchmark, Screen.Storage, Screen.Compare, Screen.Logs -> Screen.Settings
             else -> Screen.Chat
         }
@@ -77,6 +77,8 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                     onBack = {},
                     onOpened = {},
                     onOpenStarred = { screen = Screen.Starred },
+                    onOpenScheduled = { screen = Screen.Scheduled },
+                    onOpenCustomize = { screen = Screen.Customize },
                     embedded = true,
                     selectedId = openChat,
                     modifier = Modifier.width(HISTORY_PANE_WIDTH).fillMaxHeight(),
@@ -106,6 +108,20 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                 onBack = { screen = Screen.Chat },
                 onOpened = { screen = Screen.Chat },
                 onOpenStarred = { screen = Screen.Starred },
+                onOpenScheduled = { screen = Screen.Scheduled },
+                onOpenCustomize = { screen = Screen.Customize },
+                modifier = modifier,
+            )
+            Screen.Scheduled -> ScheduledScreen(
+                vm,
+                onBack = { screen = Screen.History },
+                onOpened = { screen = Screen.Chat },
+                modifier = modifier,
+            )
+            Screen.Customize -> CustomizeScreen(
+                vm,
+                onBack = { screen = Screen.History },
+                onOpenSettings = { screen = Screen.Settings },
                 modifier = modifier,
             )
             Screen.Starred -> StarredScreen(

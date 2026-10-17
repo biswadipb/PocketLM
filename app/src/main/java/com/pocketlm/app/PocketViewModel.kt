@@ -103,8 +103,11 @@ import com.pocketlm.app.data.SavedChat
 import com.pocketlm.app.data.SettingsBackup
 import com.pocketlm.app.data.StopWords
 import com.pocketlm.app.data.Thinking
+import com.pocketlm.app.data.CatalogSkill
 import com.pocketlm.app.data.Reminder
 import com.pocketlm.app.data.ReminderBook
+import com.pocketlm.app.data.Skill
+import com.pocketlm.app.data.Skills
 import com.pocketlm.app.data.ToolContext
 import com.pocketlm.app.data.ToolId
 import com.pocketlm.app.data.Tools
@@ -1267,7 +1270,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val backupKeys = setOf(
         KEY_THEME, KEY_TEXT_SCALE, KEY_CTX, KEY_CACHE_BITS, KEY_THREADS, KEY_TEMP, KEY_TOP_P, KEY_TOP_K, KEY_MIN_P, KEY_REPEAT, KEY_SEED,
         KEY_STOP, KEY_PRESETS, KEY_PRESET_ID, KEY_PROMPTS, KEY_TOOLS, KEY_BG_REPLIES, KEY_READ_ALOUD, KEY_IDLE_MINUTES,
-        KEY_MAX_REPLY, KEY_MODEL_SETTINGS, KEY_NOTES, KEY_SAVE_STATES, KEY_OCR_SCRIPT, KEY_AUTO_TITLE, KEY_AUTO_TAGS, ScheduleStore.KEY,
+        KEY_MAX_REPLY, KEY_MODEL_SETTINGS, KEY_NOTES, KEY_SAVE_STATES, KEY_OCR_SCRIPT, KEY_AUTO_TITLE, KEY_AUTO_TAGS, ScheduleStore.KEY, Skills.KEY,
     )
 
     private fun backupManager(): BackupManager {
@@ -1355,6 +1358,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         setOcrScriptInternal(OcrScript.fromId(prefs.getString(KEY_OCR_SCRIPT, null)))
         _modelSettings.value = ModelSettingsStore.fromJson(prefs.getString(KEY_MODEL_SETTINGS, null))
         _notes.value = MemoryNotes.fromJson(prefs.getString(KEY_NOTES, null))
+        _skills.value = Skills.fromJson(prefs.getString(Skills.KEY, null))
         _saveStates.value = prefs.getBoolean(KEY_SAVE_STATES, true)
         _autoTitle.value = prefs.getBoolean(KEY_AUTO_TITLE, true)
         _autoTags.value = prefs.getBoolean(KEY_AUTO_TAGS, true)
@@ -1716,6 +1720,43 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _enabledTools.update { if (on) it + tool else it - tool }
         prefs.edit().putString(KEY_TOOLS, Tools.serialise(_enabledTools.value)).apply()
     }
+
+    // ---- Skills: instructions the model loads when a request fits -----------------------
+
+    private val _skills = MutableStateFlow(Skills.fromJson(prefs.getString(Skills.KEY, null)))
+
+    /** The person's skills, switched on or off. Kept on this phone and included in backups. */
+    val skills = _skills.asStateFlow()
+
+    /** The tools to offer the model: the ones switched on, plus the skill tool while any skill is on. */
+    private fun activeTools(): Set<ToolId> = Tools.active(_enabledTools.value, _skills.value)
+
+    private fun changeSkills(change: (List<Skill>) -> List<Skill>) {
+        _skills.update(change)
+        prefs.edit().putString(Skills.KEY, Skills.toJson(_skills.value)).apply()
+        refreshSystemPrompt()
+    }
+
+    /** Adds a skill, or replaces the one with the same id. Returns what is wrong with it, or null. */
+    fun saveSkill(skill: Skill): String? {
+        val clean = skill.copy(name = skill.name.trim(), description = skill.description.trim(), instructions = skill.instructions.trim())
+        val current = _skills.value
+        Skills.problem(clean, current)?.let { return it }
+        val exists = current.any { it.id == clean.id }
+        if (!exists && current.size >= Skills.MAX_SKILLS) return "You can have up to ${Skills.MAX_SKILLS} skills."
+        changeSkills { list -> if (exists) list.map { if (it.id == clean.id) clean else it } else list + clean }
+        return null
+    }
+
+    fun setSkillEnabled(id: String, on: Boolean) = changeSkills { list -> list.map { if (it.id == id) it.copy(enabled = on) else it } }
+
+    fun deleteSkill(id: String) = changeSkills { list -> list.filterNot { it.id == id } }
+
+    /** Adds a copy of a ready-made skill from Discover. Returns what is wrong, or null. */
+    fun addCatalogSkill(entry: CatalogSkill): String? = saveSkill(entry.skill.copy(id = UUID.randomUUID().toString()))
+
+    /** Puts a request for [skill] in the message box, ready to finish and send. */
+    fun useSkill(skill: Skill) = receiveText("Use the ${skill.name} skill: ")
 
     // ---- What the model's tools leave for the person ------------------------------------
 
@@ -2135,7 +2176,8 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     private val chatSystemPrompt: String
         get() = Tools.withInstructions(
             Projects.withInstructions(MemoryNotes.withNotes(selectedPrompt, _notes.value), currentProject()),
-            _enabledTools.value,
+            activeTools(),
+            _skills.value,
         )
 
     fun setChatPreset(id: String?) {
@@ -2874,7 +2916,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             ReplyGateway.stopRequested = ::stopGeneration
             ReplyService.start(getApplication())
         }
-        val tools = _enabledTools.value
+        val tools = activeTools()
         // With tools on, the end of a tool request also ends the round so the app can run it.
         val stops = StopWords.parse(_stopWords.value) + if (tools.isEmpty()) emptyList() else listOf(Tools.CLOSE_TAG)
         val naming = namingJob
@@ -2907,6 +2949,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 reminders = reminderBook,
                 proposeNote = { _proposedNote.compareAndSet(null, it) },
                 knownNotes = { _notes.value.map { it.text } },
+                skills = { _skills.value },
             )
             val firstTitle = if (continuing) "Request to continue" else "Your message" +
                 (if (question != prompt) ", with excerpts from your documents" else "") +
@@ -3331,7 +3374,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val saved = when {
             existing == null -> schedule.copy(lastRun = System.currentTimeMillis())
             changedTiming || (!existing.enabled && schedule.enabled) -> schedule.copy(lastRun = System.currentTimeMillis())
-            else -> schedule.copy(lastRun = existing.lastRun, lastNote = existing.lastNote)
+            else -> schedule.copy(lastRun = existing.lastRun, lastNote = existing.lastNote, lastChat = existing.lastChat)
         }
         scheduleStore.update { list -> if (existing == null) list + saved else list.map { if (it.id == saved.id) saved else it } }
         PromptScheduler.reschedule(getApplication())
@@ -3428,19 +3471,30 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The model's answer to "what is this chat called?", asked in place and then taken back. Null if it could not be asked. */
     private suspend fun askForTitle(known: List<String>): AutoTitle.Named? {
+        val written = askInPlace(AutoTitle.request(known), AutoTitle.REPLY_TOKENS, schema = null) ?: return null
+        return AutoTitle.parse(written, known)
+    }
+
+    /**
+     * Puts [request] to the model inside the conversation it already remembers, and then forgets both the question and the
+     * answer, so the chat carries on as if nothing was asked. With a [schema] (a JSON Schema) the answer is held to it.
+     * Null if the model could not be asked: no room left in its memory, or it could not be set up.
+     */
+    private suspend fun askInPlace(request: String, tokens: Int, schema: String?): String? {
         val model = _loadedModel.value ?: return null
         val usage = engine.contextUsage()
-        if (usage.total - usage.used < AutoTitle.REPLY_TOKENS + NAMING_ROOM_TOKENS) return null
+        if (usage.total - usage.used < tokens + NAMING_ROOM_TOKENS) return null
         awaitModelReady()
         if (!engine.markCheckpoint()) return null
         val settings = paramsFor(model)
-        val constrained = outputConstrained
+        val constrained = outputConstrained || schema != null
         var written = ""
         try {
             if (constrained) engine.setOutputGrammar("")
+            if (schema != null && !engine.setOutputSchema(schema)) return null
             if (_thinkingSupported.value) engine.setThinking(false)
             engine.updateSampling(0.2f, settings.topP)
-            engine.sendUserPrompt(AutoTitle.request(known), AutoTitle.REPLY_TOKENS).collect { written += it }
+            engine.sendUserPrompt(request, tokens).collect { written += it }
         } finally {
             withContext(NonCancellable) {
                 try {
@@ -3455,7 +3509,68 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        return AutoTitle.parse(written, known)
+        return written
+    }
+
+    /**
+     * A question to the model that is not part of the chat on screen (for example for the health section): answered in
+     * place and forgotten. Null, with a message for the person, if the model cannot be asked just now.
+     */
+    suspend fun askModel(question: String, tokens: Int, schema: String? = null): String? {
+        if (_loadedModel.value == null) {
+            _error.value = "Load a model first, then try again."
+            return null
+        }
+        if (anythingRunning()) {
+            _error.value = "Piko is busy. Try again in a moment."
+            return null
+        }
+        if (_sleeping.value && !wakeIfAsleep()) return null
+        _naming.value = true
+        try {
+            val answer = askInPlace(question, tokens, schema)
+            if (answer == null) _error.value = "The model could not be asked just now. If this chat is very long, start a new chat first."
+            return answer
+        } finally {
+            _naming.value = false
+        }
+    }
+
+    /**
+     * Starts a new chat as a character (the health coach, for example) with [firstMessage] already sent, so the answer
+     * begins at once. The chat is named [title] and labelled with [tags]. Returns false, with a message, if it cannot start now.
+     */
+    fun startHealthChat(firstMessage: String, title: String, tags: List<String>, characterId: String = "coach"): Boolean {
+        if (_loadedModel.value == null) {
+            _error.value = "Load a model first, then try again."
+            return false
+        }
+        if (anythingRunning() || HeadlessGate.busy) {
+            _error.value = "Piko is busy. Try again in a moment."
+            return false
+        }
+        val character = presets.value.firstOrNull { it.id == characterId } ?: return false
+        viewModelScope.launch {
+            val model = _loadedModel.value ?: return@launch
+            load(model)
+            _loading.first { !it }
+            if (_loadedModel.value == null) return@launch
+            _chatPresetId.value = character.id
+            if (character.greeting.isNotBlank()) _messages.value = listOf(ChatMessage(character.greeting.trim(), false))
+            try {
+                resetOrReload(model)
+                pendingContext = Replay.build(turns())
+            } catch (e: Exception) {
+                _error.value = "Could not start the chat: ${e.message ?: e::class.simpleName}"
+                return@launch
+            }
+            val id = UUID.randomUUID().toString()
+            currentChatId = id
+            autoNames[id] = AutoTitle.Named(title.take(80), ChatTags.clean(tags))
+            namingTried += id
+            send(firstMessage)
+        }
+        return true
     }
 
     private fun currentTitle(): String = _chats.value.firstOrNull { it.id == currentChatId }?.title
@@ -4859,9 +4974,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_MODEL_SETTINGS = "model_settings"
         const val KEY_NOTES = SettingKeys.NOTES
         const val KEY_SAVE_STATES = SettingKeys.SAVE_STATES
-        const val KEY_SEARCH_SERVER = "search_server"
-        const val KEY_SEARCH_PROVIDER = "search_provider"
-        const val KEY_BRAVE_KEY = "search_brave_key"
+        const val KEY_SEARCH_SERVER = SettingKeys.SEARCH_SERVER
+        const val KEY_SEARCH_PROVIDER = SettingKeys.SEARCH_PROVIDER
+        const val KEY_BRAVE_KEY = SettingKeys.SEARCH_BRAVE_KEY
         const val KEY_HUB = "hub_source"
         const val KEY_MIRROR = "hub_mirror_url"
         const val MAX_BENCH_RESULTS = 20

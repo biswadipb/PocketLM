@@ -66,8 +66,8 @@ class ScheduleStore private constructor(private val prefs: SharedPreferences) {
 
     fun find(id: String): ScheduledPrompt? = _all.value.firstOrNull { it.id == id }
 
-    fun markRan(id: String, at: Long, note: String) = update { list ->
-        list.map { if (it.id == id) it.copy(lastRun = at, lastNote = note) else it }
+    fun markRan(id: String, at: Long, note: String, chatId: String? = null) = update { list ->
+        list.map { if (it.id == id) it.copy(lastRun = at, lastNote = note, lastChat = chatId ?: it.lastChat) else it }
     }
 
     companion object {
@@ -142,9 +142,9 @@ class PromptWorker(private val context: Context) {
             } else {
                 runner.run(job, lastRun = schedule?.lastRun ?: 0)
             }
-            PromptDelivery.deliver(context, job, result)
+            val savedChat = PromptDelivery.deliver(context, job, result)
             queue.remove(job.id)
-            if (schedule != null) store.markRan(schedule.id, System.currentTimeMillis(), PromptDelivery.summary(result))
+            if (schedule != null) store.markRan(schedule.id, System.currentTimeMillis(), PromptDelivery.summary(result), savedChat)
         }
         PromptScheduler.reschedule(context)
     }
@@ -163,6 +163,7 @@ class PromptWorker(private val context: Context) {
             notify = true,
             saveChat = true,
             notes = schedule.notes,
+            tools = schedule.tools,
             scheduleId = schedule.id,
             createdAt = now,
         )
@@ -181,7 +182,8 @@ object PromptDelivery {
         is PromptResult.Failed -> "Failed: ${result.message}"
     }
 
-    fun deliver(context: Context, job: PromptJob, result: PromptResult) {
+    /** Returns the id of the chat the answer was saved as, or null if none was. */
+    fun deliver(context: Context, job: PromptJob, result: PromptResult): String? {
         job.target?.let { sendReply(context, it, result) }
 
         var chatId: String? = null
@@ -189,6 +191,7 @@ object PromptDelivery {
             chatId = runCatching { saveChat(context, job, result) }.onFailure { AppLog.note("Could not save the chat: ${it.message}") }.getOrNull()
         }
         if (job.notify) notify(context, job, result, chatId)
+        return chatId
     }
 
     /** The answer, or why there is none, sent only to the app that asked. */

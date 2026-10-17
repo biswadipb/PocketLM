@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
@@ -102,6 +104,8 @@ fun HistoryScreen(
     onBack: () -> Unit,
     onOpened: () -> Unit,
     onOpenStarred: () -> Unit,
+    onOpenScheduled: () -> Unit,
+    onOpenCustomize: () -> Unit,
     modifier: Modifier = Modifier,
     /** True when History sits beside the chat instead of filling the screen: no back arrow, and the open chat is marked. */
     embedded: Boolean = false,
@@ -177,6 +181,12 @@ fun HistoryScreen(
                 }
                 IconButton(onClick = onOpenStarred) {
                     Icon(Icons.Outlined.StarBorder, contentDescription = "Starred messages")
+                }
+                IconButton(onClick = onOpenScheduled) {
+                    Icon(Icons.Filled.Schedule, contentDescription = "Scheduled tasks")
+                }
+                IconButton(onClick = onOpenCustomize) {
+                    Icon(Icons.Filled.Tune, contentDescription = "Customize: skills and tools")
                 }
             },
         )

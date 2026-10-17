@@ -39,6 +39,8 @@ import com.pocketlm.app.PocketViewModel
 import com.pocketlm.app.data.NotesUse
 import com.pocketlm.app.data.ScheduledPrompt
 import com.pocketlm.app.data.Schedules
+import com.pocketlm.app.data.ToolId
+import com.pocketlm.app.data.ToolLoop
 import java.time.DayOfWeek
 import java.util.UUID
 
@@ -95,6 +97,7 @@ internal fun ScheduledPromptsSection(vm: PocketViewModel) {
     val schedules by vm.scheduledPrompts.collectAsStateWithLifecycle()
     val notesStatus by vm.notesStatus.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
+    val enabledTools by vm.enabledTools.collectAsStateWithLifecycle()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     var editing by remember { mutableStateOf<ScheduledPrompt?>(null) }
     var deleting by remember { mutableStateOf<ScheduledPrompt?>(null) }
@@ -135,6 +138,9 @@ internal fun ScheduledPromptsSection(vm: PocketViewModel) {
             initial = current,
             notesChosen = notesStatus.folderName != null,
             models = models.map { it.fileName },
+            enabledTools = enabledTools,
+            onEnableTool = { vm.setToolEnabled(it, true) },
+            isNew = schedules.none { it.id == current.id },
             onSave = { schedule -> vm.saveSchedule(schedule).also { if (it == null) editing = null } },
             onDismiss = { editing = null },
         )
@@ -158,13 +164,19 @@ private fun newSchedule() = ScheduledPrompt(
     minute = 0,
 )
 
+/** The form for one scheduled task. [hint] says what was understood from a description; [needs] are tools the task works best with. */
 @Composable
-private fun ScheduleDialog(
+internal fun ScheduleDialog(
     initial: ScheduledPrompt,
     notesChosen: Boolean,
     models: List<String>,
+    enabledTools: Set<ToolId>,
+    onEnableTool: (ToolId) -> Unit,
+    isNew: Boolean,
     onSave: (ScheduledPrompt) -> String?,
     onDismiss: () -> Unit,
+    hint: String? = null,
+    needs: Set<ToolId> = emptySet(),
 ) {
     var title by remember { mutableStateOf(initial.title) }
     var prompt by remember { mutableStateOf(initial.prompt) }
@@ -173,14 +185,16 @@ private fun ScheduleDialog(
     var days by remember { mutableStateOf(initial.days) }
     var notes by remember { mutableStateOf(initial.notes) }
     var model by remember { mutableStateOf(initial.model) }
+    var tools by remember { mutableStateOf(initial.tools) }
     var menu by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial.title.isEmpty()) "New scheduled prompt" else "Edit scheduled prompt") },
+        title = { Text(if (isNew) "New scheduled task" else "Edit scheduled task") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
                 OutlinedTextField(value = title, onValueChange = { title = it.take(60) }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     value = prompt,
@@ -233,6 +247,31 @@ private fun ScheduleDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Text("Tools", style = MaterialTheme.typography.labelMedium)
+                SwitchRow(
+                    title = "Let it use my tools",
+                    description = "Web search, reading pages, weather and the other tools you switched on in Settings, Model tools. " +
+                        "Without this it only knows what the model already knows.",
+                    checked = tools,
+                    onCheckedChange = { tools = it },
+                )
+                if (tools) {
+                    val usable = ToolLoop.allowed(enabledTools)
+                    Text(
+                        if (usable.isEmpty()) "No tools are switched on yet." else "It can use: ${usable.joinToString { it.label }}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                val missing = needs - enabledTools
+                if (missing.isNotEmpty()) {
+                    Text(
+                        "This task needs ${missing.joinToString { it.label }}, which ${if (missing.size == 1) "is" else "are"} off.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    TextButton(onClick = { missing.forEach(onEnableTool) }) { Text("Turn on") }
+                }
                 Text("Model", style = MaterialTheme.typography.labelMedium)
                 Column {
                     OutlinedButton(onClick = { menu = true }) { Text(model?.removeSuffix(".gguf") ?: "The one used last") }
@@ -252,7 +291,7 @@ private fun ScheduleDialog(
                     initial.copy(
                         title = title.trim(), prompt = prompt.trim(),
                         hour = hour.toIntOrNull() ?: -1, minute = minute.toIntOrNull() ?: -1,
-                        days = days, notes = notes, model = model,
+                        days = days, notes = notes, model = model, tools = tools,
                     ),
                 )
             }) { Text("Save") }

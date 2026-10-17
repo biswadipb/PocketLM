@@ -21,6 +21,11 @@ object SettingKeys {
     const val NOTES = "memory_notes"
     const val SAVE_STATES = "save_chat_states"
 
+    // Not synced (they hold addresses and a key), but also read by prompts that run without a screen.
+    const val SEARCH_SERVER = "search_server"
+    const val SEARCH_PROVIDER = "search_provider"
+    const val SEARCH_BRAVE_KEY = "search_brave_key"
+
     /**
      * The settings that sync when the user turns that on: what a person would want on every device. Per-phone
      * choices (theme, threads, context size, background behaviour), model settings and everything secret (API key,

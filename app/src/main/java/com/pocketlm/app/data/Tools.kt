@@ -66,6 +66,10 @@ enum class ToolId(val id: String, val label: String, val blurb: String, val desc
         "sets a timer or reminder that notifies the user later. The input is when, a colon, then what, " +
             "like \"in 10 minutes: stretch\" or \"tomorrow at 9:00: call Sam\"",
     ),
+    Skill(
+        "skill", "Skills", "Loads the instructions of a skill when one fits the request. Added automatically when you have skills switched on.",
+        "loads the full instructions of one of the skills listed below, so you can follow them. The input is the skill's name",
+    ),
     SaveNote(
         "savenote", "Remember things for me",
         "Lets the model suggest a note about you to keep. Nothing is saved until you tap Save.",
@@ -89,6 +93,8 @@ class ToolContext(
     val proposeNote: ((String) -> Boolean)? = null,
     /** The notes already kept, so the same fact is not suggested twice. */
     val knownNotes: () -> List<String> = { emptyList() },
+    /** The skills the person has, for the skill tool. */
+    val skills: () -> List<Skill> = { emptyList() },
     val http: (String) -> String = { Http.request(it) },
     /** Turns a site name into addresses; replaced in tests so they need no network. */
     val resolve: (String) -> List<java.net.InetAddress> = { host -> java.net.InetAddress.getAllByName(host).toList() },
@@ -127,18 +133,24 @@ object Tools {
 
     fun serialise(enabled: Set<ToolId>): String = enabled.joinToString(",") { it.id }
 
+    /** The tools to offer: those switched on, plus the skill tool while there is at least one skill switched on. */
+    fun active(enabled: Set<ToolId>, skills: List<Skill>): Set<ToolId> =
+        if (Skills.enabled(skills).isEmpty()) enabled - ToolId.Skill else enabled + ToolId.Skill
+
     /** Tells the model how to ask for a tool. Small models need an exact, short format. */
-    fun instructions(enabled: Set<ToolId>): String {
+    fun instructions(enabled: Set<ToolId>, skills: List<Skill> = emptyList()): String {
         if (enabled.isEmpty()) return ""
         val list = ToolId.entries.filter { it in enabled }.joinToString("\n") { "- ${it.id}: ${it.describe}" }
+        val skillList = if (ToolId.Skill in enabled) Skills.listing(skills) else ""
         return "You can use tools. To use one, reply with only this one line and then stop:\n" +
             "$OPEN_TAG{\"name\":\"TOOL\",\"input\":\"INPUT\"}$CLOSE_TAG\n" +
             "Available tools:\n$list\n" +
+            (if (skillList.isEmpty()) "" else "Skills you can load with the skill tool when one fits the request:\n$skillList\n") +
             "When the tool result arrives, answer the user using it. Only use a tool when you need it."
     }
 
-    fun withInstructions(system: String, enabled: Set<ToolId>): String =
-        instructions(enabled).let { if (it.isEmpty()) system else "$system\n\n$it" }
+    fun withInstructions(system: String, enabled: Set<ToolId>, skills: List<Skill> = emptyList()): String =
+        instructions(enabled, skills).let { if (it.isEmpty()) system else "$system\n\n$it" }
 
     /** Finds the last tool request in [text], or null when there is none or it is not valid. */
     fun parseCall(text: String): ToolCall? {
@@ -288,6 +300,15 @@ object Tools {
                         if (!book.exact) append(" It may arrive a few minutes late because Android has not allowed exact timing.")
                     }
                     ToolOutcome("The reminder \"${parsed.text}\" is set for $whenText.$caveats Tell the user it is set.", "set for $whenText")
+                }
+                ToolId.Skill -> {
+                    val all = context.skills()
+                    val skill = Skills.find(all, call.input)
+                    if (skill == null) {
+                        val names = Skills.enabled(all).joinToString(", ") { it.name }.ifEmpty { "none" }
+                        return ToolOutcome("There is no skill called '${call.input}'. The skills are: $names.", "no such skill")
+                    }
+                    ToolOutcome(Skills.loaded(skill), skill.name)
                 }
                 ToolId.SaveNote -> {
                     val propose = context.proposeNote ?: return ToolOutcome("Saving notes is not available here.", "not available")

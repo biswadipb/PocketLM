@@ -24,6 +24,10 @@ data class ScheduledPrompt(
     val lastRun: Long = 0,
     /** How the last run went, shown in Settings. */
     val lastNote: String = "",
+    /** Whether a run may use the tools switched on in Settings (web search, weather and so on). */
+    val tools: Boolean = false,
+    /** The chat the last run saved, so its answer can be opened from the Scheduled page. */
+    val lastChat: String? = null,
 )
 
 object Schedules {
@@ -91,6 +95,7 @@ object Schedules {
             .put("notes", it.notes.key).put("enabled", it.enabled)
             .put("model", it.model ?: JSONObject.NULL)
             .put("lastRun", it.lastRun).put("lastNote", it.lastNote)
+            .put("tools", it.tools).put("lastChat", it.lastChat ?: JSONObject.NULL)
     }).toString()
 
     fun fromJson(text: String?): List<ScheduledPrompt> {
@@ -111,6 +116,8 @@ object Schedules {
                     model = o.optString("model", "").ifEmpty { null },
                     lastRun = o.optLong("lastRun", 0),
                     lastNote = o.optString("lastNote", ""),
+                    tools = o.optBoolean("tools", false),
+                    lastChat = o.optString("lastChat", "").ifEmpty { null },
                 )
                 schedule.takeIf { problem(it) == null }
             }.take(MAX_SCHEDULES)

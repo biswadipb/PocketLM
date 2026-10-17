@@ -45,6 +45,8 @@ data class PromptJob(
     /** Keep the answer as a chat in History. */
     val saveChat: Boolean = false,
     val notes: NotesUse = NotesUse.None,
+    /** Whether the run may use the tools switched on in Settings. */
+    val tools: Boolean = false,
     /** The schedule this run belongs to, for scheduled prompts. */
     val scheduleId: String? = null,
     val createdAt: Long = 0,
@@ -67,6 +69,7 @@ object PromptJobs {
         .put("notify", job.notify)
         .put("saveChat", job.saveChat)
         .put("notes", job.notes.key)
+        .put("tools", job.tools)
         .put("scheduleId", job.scheduleId ?: JSONObject.NULL)
         .put("createdAt", job.createdAt)
         .put("attempts", job.attempts)
@@ -95,6 +98,7 @@ object PromptJobs {
             notify = o.optBoolean("notify", false),
             saveChat = o.optBoolean("saveChat", false),
             notes = NotesUse.of(o.optString("notes", "none")),
+            tools = o.optBoolean("tools", false),
             scheduleId = o.optString("scheduleId", "").ifEmpty { null },
             createdAt = o.optLong("createdAt", 0),
             attempts = o.optInt("attempts", 0),
