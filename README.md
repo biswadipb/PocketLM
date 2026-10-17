@@ -38,6 +38,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Fit warnings: an estimate of the memory each model needs, with a confirmation before loading one that probably will not fit
 - LoRA adapters: attach small fine-tune files to a model, each with a strength, in that model's settings. They are applied when the model loads, and a saved chat state is never reused with different adapters
 - Settings for each model: its own temperature, context length and so on, its own system prompt, a chat template to use when the model's own is missing or wrong (ChatML, Llama 3, Gemma and others), and an optional smaller draft model that speeds it up (experimental)
+- GPU acceleration (experimental, in each model's settings): run a model on the phone's GPU through Vulkan (any vendor) or OpenCL (Qualcomm Adreno), or let PocketLM choose. It is off by default, loads the GPU libraries only when you ask (so a faulty graphics driver cannot stop the app starting), checks the GPU with a test pass while loading, falls back to the CPU if anything fails, and switches itself off if the app closes while trying it. Mali phones (such as the Moto Edge 50 Neo) can only use Vulkan; OpenCL needs a supported Adreno (Snapdragon 8 Gen 3 or newer, per llama.cpp). Expect mostly faster reading of long prompts; writing replies is often no faster. The draft model, document search and image reading stay on the CPU
 - Benchmark the loaded model (prompt and reply speed) and compare results across models
 - Compare two models side by side on the same question
 
@@ -130,7 +131,7 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 - Document search matches keywords, not meaning, so a question worded differently from the document may miss
 - Long document chats fill the context faster; raise the context length in Settings if needed
 - The API server is plain HTTP unless you turn on HTTPS in Settings. With HTTPS the phone makes its own certificate, which apps that call it must be told to trust (copy it from Settings); it is renewed when the phone joins a new network. The server stops if Android closes the app, and the phone may sleep and drop requests
-- CPU only; no GPU or NPU acceleration yet
+- GPU acceleration is new, off by default and has never run on a real GPU (see "GPU acceleration" above). There is no NPU support
 
 ## Project layout
 
@@ -139,10 +140,11 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 | `app/` | Jetpack Compose UI, ViewModel, model storage, chat history, document retrieval |
 | `engine/` | JNI bridge and Kotlin API around llama.cpp, including the multimodal (vision) library; adapted from llama.cpp's `examples/llama.android` |
 | `third_party/llama.cpp` | llama.cpp as a git submodule |
+| `third_party/OpenCL-Headers`, `OpenCL-ICD-Loader`, `Vulkan-Headers`, `SPIRV-Headers` | Small Khronos header repositories (submodules) that the Android NDK lacks, needed to build the GPU backends |
 
 ## Building
 
-Requirements: Android Studio (or JDK 17+), Android SDK 36, NDK 27, CMake 3.22.1. The app needs Android 11 (API 30) or newer.
+Requirements: Android Studio (or JDK 17+), Android SDK 36, NDK 27, CMake 3.22.1, Python 3 (it embeds the OpenCL kernels) and the computer's own C/C++ compiler (it builds the Vulkan shader tool). The app needs Android 11 (API 30) or newer.
 
 ```bash
 git clone --recurse-submodules https://github.com/biswadipb/PocketLM.git
@@ -172,7 +174,8 @@ Phones have limited RAM. As a rule of thumb, Q4-quantised models of 0.5B-1.5B pa
 
 - Run on a device and fix what breaks
 - More tools
-- GPU / NPU acceleration
+- Check GPU acceleration on real phones, and offload only some layers
+- NPU acceleration
 
 ## License
 

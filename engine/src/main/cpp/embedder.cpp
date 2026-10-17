@@ -42,6 +42,10 @@ Java_com_arm_aichat_internal_EmbeddingEngineImpl_nativeLoad(JNIEnv *env, jobject
 
     const auto *path = env->GetStringUTFChars(jpath, 0);
     llama_model_params model_params = llama_model_default_params();
+    // Always on the CPU: with GPU libraries around, llama.cpp would otherwise move the model to a GPU on its own.
+    static ggml_backend_dev_t no_devices[1] = {nullptr};
+    model_params.devices = no_devices;
+    model_params.n_gpu_layers = 0;
     g_emb_model = llama_model_load_from_file(path, model_params);
     LOGi("%s: %s %s", __func__, path, g_emb_model ? "loaded" : "FAILED");
     env->ReleaseStringUTFChars(jpath, path);

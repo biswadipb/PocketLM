@@ -15,6 +15,8 @@ data class ModelSettings(
     val chatTemplate: String = "",
     /** File name of a small model that drafts tokens for this one, or null for none. */
     val draftFile: String? = null,
+    /** Which GPU this model runs on: "auto", "vulkan" or "opencl". Empty keeps it on the CPU. */
+    val gpu: String = "",
     /** LoRA adapters applied on top of this model. */
     val adapters: List<AdapterSetting> = emptyList(),
 )
@@ -28,6 +30,7 @@ object ModelSettingsStore {
                 .put("preset", s.presetId ?: JSONObject.NULL)
                 .put("template", s.chatTemplate)
                 .put("draft", s.draftFile ?: JSONObject.NULL)
+                .put("gpu", s.gpu)
                 .apply {
                     if (s.adapters.isNotEmpty()) {
                         put("loras", org.json.JSONArray(s.adapters.map { JSONObject().put("file", it.file).put("scale", it.scale.toDouble()) }))
@@ -74,6 +77,7 @@ object ModelSettingsStore {
                             if (o.isNull("preset")) null else o.optString("preset").ifEmpty { null },
                             o.optString("template", ""),
                             if (o.isNull("draft")) null else o.optString("draft").ifEmpty { null },
+                            gpu = o.optString("gpu", ""),
                             o.optJSONArray("loras")?.let { a ->
                                 (0 until a.length()).mapNotNull { i ->
                                     val l = a.optJSONObject(i) ?: return@mapNotNull null

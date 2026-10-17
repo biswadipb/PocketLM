@@ -16,6 +16,8 @@ import androidx.lifecycle.viewModelScope
 import com.arm.aichat.AiChat
 import com.arm.aichat.EmbeddingException
 import com.arm.aichat.GenerationParams
+import com.arm.aichat.GpuDevice
+import com.arm.aichat.GpuStatus
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.LoraAdapter
 import com.arm.aichat.isModelLoaded
@@ -112,6 +114,8 @@ import com.pocketlm.app.data.ModelHub
 import com.pocketlm.app.data.ModelInfo
 import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
+import com.pocketlm.app.data.GpuChoice
+import com.pocketlm.app.data.GpuGuard
 import com.pocketlm.app.data.Ocr
 import com.pocketlm.app.data.SearchConfig
 import com.pocketlm.app.data.SearchProvider
@@ -300,8 +304,62 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val adapters = own?.adapters.orEmpty().mapNotNull { a ->
             adapterStore.file(a.file)?.let { LoraAdapter(it.absolutePath, a.scale) }
         }
+        // A GPU is used only if this model asks for one and it has not been switched off after a crash.
+        val gpu = if (_gpuDisabled.value) "" else own?.gpu.orEmpty()
         return (own?.params ?: _generationParams.value)
-            .copy(chatTemplate = own?.chatTemplate.orEmpty(), draftModelPath = draft, adapters = adapters)
+            .copy(chatTemplate = own?.chatTemplate.orEmpty(), draftModelPath = draft, adapters = adapters, gpuBackend = gpu)
+    }
+
+    // ---- Graphics processors (GPU) ---------------------------------------------------------
+
+    private val gpuGuard = GpuGuard(object : GpuGuard.Flags {
+        override fun get(key: String) = prefs.getBoolean(key, false)
+
+        // Written straight away: it has to be on disk even if the app dies a moment later.
+        override fun set(key: String, value: Boolean) {
+            prefs.edit().putBoolean(key, value).commit()
+        }
+    })
+
+    private val _gpuDisabled = MutableStateFlow(gpuGuard.disabled)
+
+    /** True when the GPU was switched off because the app ended while trying it. */
+    val gpuDisabled = _gpuDisabled.asStateFlow()
+
+    private val _gpuDevices = MutableStateFlow<List<GpuDevice>?>(null)
+
+    /** The GPUs found the last time the phone was checked, or null if it has not been checked. */
+    val gpuDevices = _gpuDevices.asStateFlow()
+
+    private val _probingGpus = MutableStateFlow(false)
+    val probingGpus = _probingGpus.asStateFlow()
+
+    private val _gpuStatus = MutableStateFlow(GpuStatus(false, ""))
+
+    /** Where the loaded model is running, for the Models screen. */
+    val gpuStatus = _gpuStatus.asStateFlow()
+
+    /** Looks for GPUs this phone can use. This is the first time the phone's graphics driver is touched. */
+    fun checkForGpus() {
+        if (_probingGpus.value || _gpuDisabled.value) return
+        _probingGpus.value = true
+        viewModelScope.launch {
+            gpuGuard.attemptStarting()
+            try {
+                _gpuDevices.value = engine.listGpus()
+            } catch (e: Exception) {
+                _gpuDevices.value = emptyList()
+                _error.value = "Could not look for GPUs: ${e.message ?: e::class.simpleName}"
+            } finally {
+                gpuGuard.attemptFinished()
+                _probingGpus.value = false
+            }
+        }
+    }
+
+    fun allowGpuAgain() {
+        gpuGuard.allowAgain()
+        _gpuDisabled.value = false
     }
 
     private val adapterStore = AdapterStore(app)
@@ -2037,7 +2095,18 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         stopGeneration()
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         awaitIdleEngine()
-        engine.loadModel(model.path, paramsFor(model))
+        val params = paramsFor(model)
+        if (params.gpuBackend.isNotEmpty()) gpuGuard.attemptStarting()
+        try {
+            engine.loadModel(model.path, params)
+        } finally {
+            // Reached only if the app is still alive, so whatever happened, it did not take the app down.
+            if (params.gpuBackend.isNotEmpty()) gpuGuard.attemptFinished()
+        }
+        _gpuStatus.value = engine.gpuStatus()
+        if (params.gpuBackend.isNotEmpty() && !_gpuStatus.value.onGpu) {
+            _gpuStatus.value.text.takeIf { it.isNotEmpty() }?.let { _error.value = it }
+        }
 
         var restored = false
         val chatId = currentChatId
@@ -2099,6 +2168,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         if (engine.state.value.isModelLoaded) engine.cleanUp()
         _loadedModel.value = null
         _visionReady.value = false
+        _gpuStatus.value = GpuStatus(false, "")
         clearConversation()
     }
 
@@ -2543,6 +2613,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             append("Reply limit: ").append(_maxReplyTokens.value).append(" tokens")
             if (_jsonSchema.value != null) append("\nReplies follow a JSON schema")
             else if (_jsonMode.value) append("\nReplies must be valid JSON")
+            engine.gpuStatus().text.takeIf { it.isNotEmpty() }?.let { append("\n").append(if (engine.gpuStatus().onGpu) "Running on the GPU: " else "GPU: ").append(it) }
             engine.draftStatus().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
             params.adapters.takeIf { it.isNotEmpty() }?.let { list ->
                 append("\nAdapters: ").append(list.joinToString(", ") { File(it.path).name.removeSuffix(".gguf") + " x" + it.scale })
@@ -2600,6 +2671,15 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 append("Context ").append(p.contextSize).append(", threads ").append(if (p.threads == 0) "auto" else p.threads.toString())
                 append(", template ").append(p.chatTemplate.ifEmpty { "automatic" }).append("\n")
                 engine.draftStatus().takeIf { s -> s.isNotEmpty() }?.let { s -> append(s).append("\n") }
+                val gpu = engine.gpuStatus()
+                append("GPU: ").append(
+                    when {
+                        gpu.onGpu -> "in use, ${gpu.text}"
+                        _gpuDisabled.value -> "switched off after the app closed while trying it"
+                        p.gpuBackend.isEmpty() -> "off"
+                        else -> "asked for (${p.gpuBackend}) but not used: ${gpu.text.ifEmpty { "no reason given" }}"
+                    },
+                ).append("\n")
                 append("Vision: ").append(if (_visionReady.value) "on" else "off").append("\n")
             }
             append("Engine state: ").append(engine.state.value.javaClass.simpleName).append("\n")
@@ -3394,6 +3474,12 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
                 delay(SYNC_START_DELAY_MS)
                 runSync(manual = false)
             }
+        }
+        // If the app ended while it was trying a GPU, do not try again until the user says so.
+        if (gpuGuard.recoverFromCrash()) {
+            _gpuDisabled.value = true
+            _error.value = "PocketLM closed while trying to use the GPU, so the GPU is switched off. " +
+                "You can allow it again in a model's settings."
         }
         // Every message shown to the user is also written to the log, so a bug report includes it.
         viewModelScope.launch {

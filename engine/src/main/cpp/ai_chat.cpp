@@ -55,6 +55,54 @@ static std::vector<llama_adapter_lora *>  g_lora;       // LoRA adapters attache
 static std::vector<float>                 g_lora_scale;
 static int                                g_base_threads = 4; // what was chosen when the context was made; scaled down when the phone runs hot
 
+// ---- GPUs -------------------------------------------------------------------------------------
+//
+// The GPU backends (Vulkan, OpenCL) are separate libraries that are NOT loaded when the app starts: just loading
+// one makes the phone's graphics driver run, and a faulty driver would then take the app down on every start.
+// They are loaded only when the user asks for a GPU. llama.cpp uses every GPU it knows about unless told
+// otherwise, so every model is loaded with an explicit list of devices: the chosen GPU, or none at all.
+
+static ggml_backend_dev_t g_no_devices[1] = {nullptr};  // an empty, NULL-ended list: keep this model on the CPU
+static std::string        g_backend_dir;                // where the backend libraries are
+static bool               g_gpu_libs_loaded = false;
+static std::string        g_model_path;
+static std::string        g_gpu_active;                 // e.g. "Vulkan: Mali-G615" while the loaded model runs on a GPU
+static std::string        g_gpu_note;                   // why a GPU was asked for but is not used
+
+static std::string lower_case(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    return text;
+}
+
+static bool is_gpu(ggml_backend_dev_t dev) {
+    const auto type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+}
+
+static std::string backend_name_of(ggml_backend_dev_t dev) {
+    return ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev));
+}
+
+/** The GPU for [want] ("auto", "vulkan" or "opencl"), or null. Auto prefers OpenCL on Adreno, and Vulkan elsewhere. */
+static ggml_backend_dev_t pick_gpu(const std::string &want) {
+    ggml_backend_dev_t vulkan = nullptr, opencl = nullptr, adreno = nullptr;
+    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+        auto *dev = ggml_backend_dev_get(i);
+        if (!is_gpu(dev)) { continue; }
+        const std::string backend = lower_case(backend_name_of(dev));
+        const std::string description = lower_case(ggml_backend_dev_description(dev));
+        if (backend.find("vulkan") != std::string::npos && !vulkan) { vulkan = dev; }
+        if (backend.find("opencl") != std::string::npos) {
+            if (!opencl) { opencl = dev; }
+            if (!adreno && description.find("adreno") != std::string::npos) { adreno = dev; }
+        }
+    }
+    if (want == "vulkan") { return vulkan; }
+    if (want == "opencl") { return opencl; }
+    if (adreno) { return adreno; }
+    return vulkan ? vulkan : opencl;
+}
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unused*/, jstring nativeLibDir) {
@@ -64,7 +112,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unu
     // Loading all CPU backend variants
     const auto *path_to_backend = env->GetStringUTFChars(nativeLibDir, 0);
     LOGi("Loading backends from %s", path_to_backend);
-    ggml_backend_load_all_from_path(path_to_backend);
+    g_backend_dir = path_to_backend;
+    ggml_backend_load_all_from_path(path_to_backend);  // finds the CPU libraries; the GPU ones have other names
     env->ReleaseStringUTFChars(nativeLibDir, path_to_backend);
 
     // Initialize backends
@@ -74,18 +123,42 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unu
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path) {
+Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path, jstring jgpu) {
     llama_model_params model_params = llama_model_default_params();
+    g_gpu_active.clear();
+    g_gpu_note.clear();
+
+    // "" keeps the model on the CPU; "auto", "vulkan" or "opencl" ask for a GPU (its library must be loaded already).
+    const auto *gpu_chars = env->GetStringUTFChars(jgpu, nullptr);
+    const std::string want = lower_case(gpu_chars);
+    env->ReleaseStringUTFChars(jgpu, gpu_chars);
+    ggml_backend_dev_t gpu[2] = {nullptr, nullptr};
+    if (!want.empty()) {
+        gpu[0] = pick_gpu(want);
+        if (!gpu[0]) { g_gpu_note = "No usable GPU was found, so the CPU is used."; }
+    }
+    model_params.devices = gpu[0] ? gpu : g_no_devices;
+    model_params.n_gpu_layers = gpu[0] ? -1 : 0;
 
     const auto *model_path = env->GetStringUTFChars(jmodel_path, 0);
+    g_model_path = model_path;
     LOGd("%s: Loading model from: \n%s\n", __func__, model_path);
 
     auto *model = llama_model_load_from_file(model_path, model_params);
+    if (!model && gpu[0]) {
+        LOGw("%s: loading on the GPU failed; trying the CPU", __func__);
+        g_gpu_note = "The GPU could not load this model, so the CPU is used.";
+        model_params.devices = g_no_devices;
+        model_params.n_gpu_layers = 0;
+        gpu[0] = nullptr;
+        model = llama_model_load_from_file(model_path, model_params);
+    }
     env->ReleaseStringUTFChars(jmodel_path, model_path);
     if (!model) {
         return 1;
     }
     g_model = model;
+    if (gpu[0]) { g_gpu_active = backend_name_of(gpu[0]) + ": " + ggml_backend_dev_description(gpu[0]); }
     return 0;
 }
 
@@ -180,7 +253,38 @@ JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(
         JNIEnv * /*env*/, jobject /*unused*/, jint n_ctx, jint n_threads, jfloat temp, jfloat top_p,
         jint top_k, jfloat min_p, jfloat repeat_penalty, jint seed, jint cache_bits) {
-    auto *context = init_context(g_model, n_ctx, n_threads, cache_bits);
+    // On a GPU, run one token through the model before trusting it: the GPU compiles its programs on first use, so a
+    // problem shows up here, while loading, instead of in the middle of a reply.
+    const auto make_context = [&]() -> llama_context * {
+        llama_context *made = init_context(g_model, n_ctx, n_threads, cache_bits);
+        if (made && !g_gpu_active.empty()) {
+            llama_token first = llama_vocab_bos(llama_model_get_vocab(g_model));
+            if (first == LLAMA_TOKEN_NULL) { first = 0; }
+            common_batch probe(made);
+            probe.add(first, 0, 0, true);
+            const bool worked = llama_process(made, LLAMA_PROCESS_TYPE_DECODE, probe.get()) == 0;
+            llama_memory_clear(llama_get_memory(made), true);
+            if (!worked) {
+                llama_free(made);
+                return nullptr;
+            }
+        }
+        return made;
+    };
+    auto *context = make_context();
+    if (!context && !g_gpu_active.empty()) {
+        // The GPU could hold the model but not run it: start over on the CPU.
+        LOGw("%s: the GPU did not work; reloading the model on the CPU", __func__);
+        llama_model_free(g_model);
+        llama_model_params cpu_only = llama_model_default_params();
+        cpu_only.devices = g_no_devices;
+        cpu_only.n_gpu_layers = 0;
+        g_model = llama_model_load_from_file(g_model_path.c_str(), cpu_only);
+        g_gpu_active.clear();
+        g_gpu_note = "The GPU ran out of memory or failed, so the CPU is used.";
+        if (!g_model) { return 1; }
+        context = make_context();
+    }
     if (!context) { return 1; }
     g_context = context;
     g_n_ctx = (int) llama_n_ctx(context);
@@ -315,15 +419,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_applyChatTemplate(JNIEnv *env, 
 }
 
 static std::string get_backend() {
-    std::vector<std::string> backends;
-    for (size_t i = 0; i < ggml_backend_reg_count(); i++) {
-        auto *reg = ggml_backend_reg_get(i);
-        std::string name = ggml_backend_reg_name(reg);
-        if (name != "CPU") {
-            backends.push_back(ggml_backend_reg_name(reg));
-        }
-    }
-    return backends.empty() ? "CPU" : join(backends, ",");
+    // What the loaded model runs on, not every backend that happens to be registered.
+    return g_gpu_active.empty() ? "CPU" : g_gpu_active;
 }
 
 extern "C"
@@ -1080,7 +1177,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_attachDraft(JNIEnv *env, jobjec
     const std::string path(path_chars);
     env->ReleaseStringUTFChars(jpath, path_chars);
 
-    llama_model *model = llama_model_load_from_file(path.c_str(), llama_model_default_params());
+    llama_model_params draft_params = llama_model_default_params();
+    draft_params.devices = g_no_devices;  // the draft model stays on the CPU
+    draft_params.n_gpu_layers = 0;
+    llama_model *model = llama_model_load_from_file(path.c_str(), draft_params);
     if (!model) { return 2; }
     if (!common_speculative_are_compatible(g_model, model)) {
         llama_model_free(model);
@@ -1187,6 +1287,49 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_draftSummary(JNIEnv *env, jobje
     char text[160];
     snprintf(text, sizeof(text), "%ld of %ld guessed tokens were right", g_draft_accepted, g_draft_proposed);
     return env->NewStringUTF(text);
+}
+
+/**
+ * Loads the GPU libraries (once) and lists the GPUs they found, one per line as "backend<TAB>name<TAB>description<TAB>bytes".
+ * This is the first time the phone's graphics driver is touched, so the caller guards it against a crash.
+ */
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_findGpus(JNIEnv *env, jobject /*unused*/) {
+    if (!g_gpu_libs_loaded) {
+        g_gpu_libs_loaded = true;
+        for (const char *name : {"gpu-vulkan", "gpu-opencl"}) {
+            const std::string path = g_backend_dir + "/lib" + name + ".so";
+            if (access(path.c_str(), R_OK) != 0) { continue; }
+            if (!ggml_backend_load(path.c_str())) { LOGw("findGpus: could not load %s", path.c_str()); }
+        }
+    }
+    std::string text;
+    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+        auto *dev = ggml_backend_dev_get(i);
+        if (!is_gpu(dev)) { continue; }
+        size_t free_bytes = 0, total_bytes = 0;
+        ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+        text += backend_name_of(dev) + "\t" + ggml_backend_dev_name(dev) + "\t" + ggml_backend_dev_description(dev) +
+                "\t" + std::to_string(total_bytes) + "\n";
+    }
+    if (!is_valid_utf8(text.c_str())) { text.clear(); }
+    return env->NewStringUTF(text.c_str());
+}
+
+/** "Vulkan: Mali-G615" while the loaded model runs on a GPU; otherwise why it does not (or empty). */
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_gpuInUse(JNIEnv *env, jobject /*unused*/) {
+    const std::string text = g_gpu_active.empty() ? g_gpu_note : g_gpu_active;
+    return env->NewStringUTF(is_valid_utf8(text.c_str()) ? text.c_str() : "");
+}
+
+/** True if the loaded model runs on a GPU (so [gpuInUse] is the device, not a reason). */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_onGpu(JNIEnv * /*env*/, jobject /*unused*/) {
+    return g_gpu_active.empty() ? JNI_FALSE : JNI_TRUE;
 }
 
 /**
@@ -1430,6 +1573,8 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     g_batch = common_batch();
     llama_free(g_context);
     llama_model_free(g_model);
+    g_gpu_active.clear();
+    g_gpu_note.clear();
 }
 
 extern "C"

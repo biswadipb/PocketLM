@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.arm.aichat.ContextUsage
 import com.arm.aichat.GenerationParams
+import com.arm.aichat.GpuStatus
+import com.arm.aichat.GpuDevice
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.PromptNotProcessed
 import com.arm.aichat.isModelLoaded
@@ -87,7 +89,15 @@ internal class InferenceEngineImpl private constructor(
     private external fun init(nativeLibDir: String)
 
     @FastNative
-    private external fun load(modelPath: String): Int
+    private external fun load(modelPath: String, gpu: String): Int
+
+    private external fun findGpus(): String
+
+    @FastNative
+    private external fun gpuInUse(): String
+
+    @FastNative
+    private external fun onGpu(): Boolean
 
     @FastNative
     private external fun prepare(
@@ -223,7 +233,9 @@ internal class InferenceEngineImpl private constructor(
                 Log.i(TAG, "Loading model... \n$pathToModel")
                 _readyForSystemPrompt = false
                 _state.value = InferenceEngine.State.LoadingModel
-                load(pathToModel).let {
+                // Only now, and only if a GPU was asked for, does the phone's graphics driver get involved.
+                if (params.gpuBackend.isNotBlank()) findGpus()
+                load(pathToModel, params.gpuBackend).let {
                     // TODO-han.yin: find a better way to pass other error codes
                     if (it != 0) throw UnsupportedArchitectureException()
                 }
@@ -436,6 +448,11 @@ internal class InferenceEngineImpl private constructor(
         }
 
     override fun adapterStatus(): String = if (_state.value.isModelLoaded) adapterProblem else ""
+
+    override suspend fun listGpus(): List<GpuDevice> = withContext(llamaDispatcher) { GpuDevice.parse(findGpus()) }
+
+    override fun gpuStatus(): GpuStatus =
+        if (!_state.value.isModelLoaded) GpuStatus(false, "") else GpuStatus(onGpu(), gpuInUse())
 
     override fun draftStatus(): String = when {
         !draftWanted || !_state.value.isModelLoaded -> ""

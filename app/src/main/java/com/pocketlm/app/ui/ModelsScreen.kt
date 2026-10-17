@@ -79,6 +79,10 @@ fun ModelsScreen(
     val presets by vm.presets.collectAsStateWithLifecycle()
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
     var settingsFor by remember { mutableStateOf<LocalModel?>(null) }
+    val gpuDevices by vm.gpuDevices.collectAsStateWithLifecycle()
+    val gpuDisabled by vm.gpuDisabled.collectAsStateWithLifecycle()
+    val probingGpus by vm.probingGpus.collectAsStateWithLifecycle()
+    val gpuStatus by vm.gpuStatus.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val memory = rememberMemoryInfo(models)
     var url by rememberSaveable { mutableStateOf("") }
@@ -97,6 +101,11 @@ fun ModelsScreen(
             otherModels = models.filter { it.path != model.path },
             maxThreads = Runtime.getRuntime().availableProcessors(),
             importAdapter = { uri, done -> vm.importAdapter(uri, model, done) },
+            gpuDevices = gpuDevices,
+            gpuDisabled = gpuDisabled,
+            checkingGpus = probingGpus,
+            onCheckGpus = vm::checkForGpus,
+            onAllowGpu = vm::allowGpuAgain,
             onSave = { vm.setModelSettings(model, it); settingsFor = null },
             onDismiss = { settingsFor = null },
         )
@@ -162,6 +171,9 @@ fun ModelsScreen(
                     projector = projectorChoice[m.fileName],
                     onProjector = { vm.setProjector(m, it) },
                     hasOwnSettings = own != null,
+                    runningOn = if (loaded?.path == m.path && gpuStatus.text.isNotEmpty()) {
+                        (if (gpuStatus.onGpu) "Running on the GPU: " else "GPU not used: ") + gpuStatus.text
+                    } else null,
                     onSettings = { settingsFor = m },
                 )
             }
@@ -239,6 +251,7 @@ private fun LocalModelCard(
     projector: String?,
     onProjector: (String?) -> Unit,
     hasOwnSettings: Boolean,
+    runningOn: String?,
     onSettings: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
@@ -263,6 +276,9 @@ private fun LocalModelCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = fitColor,
             )
+            runningOn?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
             var confirmLoad by remember { mutableStateOf(false) }
             if (confirmLoad) {
                 AlertDialog(

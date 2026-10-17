@@ -113,6 +113,15 @@ interface InferenceEngine {
     fun draftStatus(): String
 
     /**
+     * Loads the GPU libraries (the first time the phone's graphics driver is used) and lists the GPUs they found.
+     * Empty when the phone has none that PocketLM can use.
+     */
+    suspend fun listGpus(): List<GpuDevice>
+
+    /** Where the loaded model is running. */
+    fun gpuStatus(): GpuStatus
+
+    /**
      * Loads a multimodal projector (an "mmproj" GGUF) for the loaded model so it can read images.
      * Call after [loadModel]. Returns false if the projector doesn't match or has no vision support.
      */
@@ -201,7 +210,24 @@ data class GenerationParams(
     val adapters: List<LoraAdapter> = emptyList(),
     /** How many bits each number in the model's memory of the chat takes: 16 (normal), 8 or 4 (less memory). */
     val cacheBits: Int = 16,
+    /** Which GPU to run the model on: "auto", "vulkan" or "opencl". Empty keeps it on the CPU. */
+    val gpuBackend: String = "",
 )
+
+/** A graphics processor the model could run on. [backend] is "Vulkan" or "OpenCL". */
+data class GpuDevice(val backend: String, val name: String, val description: String, val totalBytes: Long) {
+    companion object {
+        /** Reads the lines the native side returns: backend, name, description and memory, separated by tabs. */
+        fun parse(text: String): List<GpuDevice> = text.lines().mapNotNull { line ->
+            val parts = line.split('\t')
+            if (parts.size < 4 || parts[0].isBlank()) null
+            else GpuDevice(parts[0], parts[1], parts[2], parts[3].toLongOrNull() ?: 0L)
+        }
+    }
+}
+
+/** Where the loaded model runs: [onGpu] with [text] naming the device, or off the GPU with [text] saying why (or empty). */
+data class GpuStatus(val onGpu: Boolean, val text: String)
 
 /** A LoRA adapter file and how strongly it is applied: 1.0 is as trained, 0 is off. */
 data class LoraAdapter(val path: String, val scale: Float = 1f)

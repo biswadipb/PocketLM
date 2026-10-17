@@ -37,7 +37,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.arm.aichat.GenerationParams
+import com.arm.aichat.GpuDevice
 import com.pocketlm.app.data.ChatTemplates
+import com.pocketlm.app.data.GpuChoice
+import com.pocketlm.app.data.summary
 import com.pocketlm.app.data.LocalModel
 import com.pocketlm.app.data.ModelSettings
 import com.pocketlm.app.data.Preset
@@ -57,6 +60,11 @@ fun ModelSettingsDialog(
     otherModels: List<LocalModel>,
     maxThreads: Int,
     importAdapter: (Uri, (name: String?, problem: String?) -> Unit) -> Unit,
+    gpuDevices: List<GpuDevice>?,
+    gpuDisabled: Boolean,
+    checkingGpus: Boolean,
+    onCheckGpus: () -> Unit,
+    onAllowGpu: () -> Unit,
     onSave: (ModelSettings?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -66,6 +74,7 @@ fun ModelSettingsDialog(
     var presetId by remember { mutableStateOf(current?.presetId) }
     var template by remember { mutableStateOf(current?.chatTemplate.orEmpty()) }
     var draft by remember { mutableStateOf(current?.draftFile) }
+    var gpu by remember { mutableStateOf(GpuChoice.fromId(current?.gpu)) }
     var adapters by remember { mutableStateOf(current?.adapters.orEmpty()) }
     var adapterProblem by remember { mutableStateOf<String?>(null) }
     var importing by remember { mutableStateOf(false) }
@@ -162,6 +171,41 @@ fun ModelSettingsDialog(
                     Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
 
+                Heading("GPU acceleration (experimental)")
+                Text(
+                    "Runs this model on the phone's graphics processor instead of the CPU. It can speed up reading long prompts " +
+                        "and documents, but writing replies is often no faster, and phone GPU drivers vary a lot, so try it and " +
+                        "compare with the benchmark. If the GPU does not work, PocketLM uses the CPU. Takes effect the next time " +
+                        "the model loads. The draft model, document search and image reading stay on the CPU.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (gpuDisabled) {
+                    Text(
+                        "The GPU was switched off because PocketLM closed while trying it.",
+                        Modifier.padding(top = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    TextButton(onClick = onAllowGpu) { Text("Allow the GPU again") }
+                } else {
+                    ChoiceMenu(
+                        valueText = gpu.label,
+                        options = GpuChoice.entries.map { it.id to it.label },
+                        onPick = { gpu = GpuChoice.fromId(it) },
+                    )
+                    TextButton(onClick = onCheckGpus, enabled = !checkingGpus) {
+                        Text(if (checkingGpus) "Checking…" else "Check this phone for GPUs")
+                    }
+                    gpuDevices?.let { devices ->
+                        Text(
+                            if (devices.isEmpty()) "No GPU that PocketLM can use was found."
+                            else "Found:\n" + devices.joinToString("\n") { it.summary() },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
                 Heading("Draft model (experimental)")
                 Text(
                     "A smaller model of the same family guesses ahead and this one checks the guesses, which can make replies " +
@@ -194,11 +238,12 @@ fun ModelSettingsDialog(
                     presetId = presetId,
                     chatTemplate = template,
                     draftFile = draft,
+                    gpu = gpu.id,
                     adapters = adapters,
                 )
                 onSave(
                     result.takeIf {
-                        it.params != null || it.presetId != null || it.chatTemplate.isNotEmpty() || it.draftFile != null || it.adapters.isNotEmpty()
+                        it.params != null || it.presetId != null || it.chatTemplate.isNotEmpty() || it.draftFile != null || it.gpu.isNotEmpty() || it.adapters.isNotEmpty()
                     },
                 )
             }) { Text("Save") }

@@ -31,6 +31,12 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            // Built only so the OpenCL backend has something to link against. At run time the phone's own libOpenCL.so is used.
+            excludes += "**/libOpenCL.so"
+        }
+    }
 }
 
 dependencies {
