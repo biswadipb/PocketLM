@@ -92,8 +92,11 @@ object PromptScheduler {
     /** Runs the waiting prompts as soon as Android allows. */
     fun kick(context: Context) {
         val scheduler = context.getSystemService(JobScheduler::class.java)
-        val expedited = JobInfo.Builder(JOB_NOW, component(context)).setExpedited(true).build()
-        if (scheduler.schedule(expedited) == JobScheduler.RESULT_SUCCESS) return
+        // Urgent jobs exist from Android 12; Android 11 only has the ordinary kind below.
+        if (Build.VERSION.SDK_INT >= 31) {
+            val expedited = JobInfo.Builder(JOB_NOW, component(context)).setExpedited(true).build()
+            if (scheduler.schedule(expedited) == JobScheduler.RESULT_SUCCESS) return
+        }
         // The quota for urgent jobs may be used up; an ordinary job still runs soon.
         scheduler.schedule(JobInfo.Builder(JOB_NOW, component(context)).setRequiresBatteryNotLow(true).build())
     }
