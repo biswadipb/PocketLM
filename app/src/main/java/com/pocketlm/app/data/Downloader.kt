@@ -24,9 +24,10 @@ object Downloader {
      * Fetches [url] into [partial], then renames it to [target]. [onProgress] receives
      * (bytesDone, totalBytes); total is -1 when the server did not say.
      */
-    suspend fun download(url: String, target: File, partial: File, onProgress: (Long, Long) -> Unit) =
+    suspend fun download(url: String, target: File, partial: File, onProgress: (Long, Long) -> Unit): Verified =
         withContext(Dispatchers.IO) {
             var offset = if (partial.exists()) partial.length() else 0L
+            val expected = Verification.expectedFor(url)
 
             val conn = URL(url).openConnection() as HttpURLConnection
             try {
@@ -42,8 +43,9 @@ object Downloader {
                     416 -> {
                         // Our partial file is at or past the end. If it is exactly the whole file we are done.
                         if (totalFromContentRange(conn.getHeaderField("Content-Range")) == offset) {
+                            val verified = checkAgainst(expected, partial)
                             if (!partial.renameTo(target)) throw IOException("Could not save ${target.name}")
-                            return@withContext
+                            return@withContext verified
                         }
                         partial.delete()
                         throw IOException("The partly downloaded file was out of date and was removed. Try again.")
@@ -79,6 +81,21 @@ object Downloader {
             } finally {
                 conn.disconnect()
             }
+            val verified = checkAgainst(expected, partial)
             if (!partial.renameTo(target)) throw IOException("Could not save ${target.name}")
+            verified
         }
+
+    /** What became of the checksum check on a finished download. */
+    enum class Verified { Yes, NotChecked }
+
+    /** Compares [file] with the SHA-256 the site published. A file that does not match is deleted, so it can't be used by mistake. */
+    private fun checkAgainst(expected: String?, file: File): Verified {
+        if (expected == null) return Verified.NotChecked
+        if (!Verification.matches(expected, Verification.sha256(file))) {
+            file.delete()
+            throw IOException("The downloaded file does not match the checksum the model site lists for it, so it was deleted. Try downloading it again.")
+        }
+        return Verified.Yes
+    }
 }

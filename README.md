@@ -11,8 +11,10 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 - Markdown rendering: headings, lists, bold, italic, inline code, and fenced code blocks with a copy button
 - Copy any reply, regenerate the latest one, or edit one of your messages and re-run from there
 - Saved prompts: reusable messages you can insert from the message box
-- Dictate a message with your phone's speech recogniser, and have replies read aloud (per reply, or automatically)
-- Share text into PocketLM from any app, or send selected text through the text selection menu
+- Dictate a message with your phone's speech recogniser, or, in Settings, with a speech model that runs on the phone (Qwen3-ASR, about 1 GB, many languages) so no audio is sent anywhere; replies can be read aloud (per reply, or automatically)
+- Share text into PocketLM from any app, or select text and choose Explain, Translate, Summarise or Improve with PocketLM in the text selection menu
+- Characters: presets with a greeting and an emoji. A new chat offers "Start a chat as…" with a storyteller, interview coach, debate partner and pirate built in, and you can make your own in Settings, System prompt
+- Reply from the notification: when a reply is ready while the app is closed, type your next message into the notification and the model answers without opening the app (if the app is locked or closed it opens with your text ready instead)
 - Open straight to the chat from a Quick Settings tile, a home-screen widget, or the app-icon shortcut
 - Per-chat options: pick the model and system prompt for just that chat, or restrict replies to valid JSON
 - Incognito chats: the eye-off button starts a chat that is never saved, synced or listed in History. Its attached files and photos are erased when you leave it (and on the next start if the app was killed), its notification does not show the reply, and the screen is hidden from recent apps and screenshots while it is open
@@ -32,6 +34,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 **Models**
 - Built-in catalog of small models with a fit check for this phone and a "Recommended" pick; load / unload / delete
 - Resumable downloads that keep going in the background, with a progress notification
+- Downloads from Hugging Face are checked against the SHA-256 it publishes when they finish (a file that does not match is deleted), and can be limited to Wi-Fi so they never use mobile data. A model list in PocketLM's repository (`catalog/models.json`) can add models to the catalog without a new app version; it is read when you open Models, can be switched off, and only Hugging Face and ModelScope links in it are accepted
 - Search for GGUF models and download a specific quantisation from Hugging Face, ModelScope, Kaggle (with a Load more button for further pages of results), or any Hugging Face compatible server you type in (a regional mirror, or one on your own network)
 - Paste a `.gguf` link or import a file from storage
 - Model details read from the GGUF header: parameters, architecture, quantisation, trained context length, layers, license
@@ -45,6 +48,7 @@ Run AI language models locally on your Android phone, like LM Studio does on the
 **Conversations**
 - Chats are saved automatically; reopen, rename, pin, search and delete them from History
 - Tags: label chats (up to 8 each) and filter History by a tag. Tags travel with the chat when syncing
+- Projects (History, folder icon): a group of chats that share instructions and documents. Every chat in a project follows its instructions and can answer from its documents without attaching them again. Projects stay on the phone that made them
 - Import from ChatGPT or Claude: Settings, Backup. Choose the .zip you were sent (or its conversations.json); the text of every conversation becomes a chat, tagged by where it came from. The branch of a ChatGPT conversation that was last shown is kept. Importing the same file again does not duplicate chats
 - Share a chat as text, or save it as a Markdown file
 - Long replies keep going in the background (even with the screen off), with a Stop button in a small notification, and you get a notification when one is ready
@@ -89,11 +93,12 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 - Free memory when idle: unload the model after 5 to 60 minutes of inactivity; it loads again when you send a message (off by default)
 - Memory notes: facts about you ("I'm vegetarian", "I write Kotlin") that are added to every chat's system prompt while switched on; they are never sent to apps that use the local API server
 - Save each chat's state (on by default): faster reopening and waking, at the cost of cache storage (up to about 0.75 GB in all, which Android or "Clear cache" can take back)
-- Default assistant: pick PocketLM in your phone's assistant setting and the phone's assistant gesture opens PocketLM ready to type
+- Default assistant: pick PocketLM in your phone's assistant setting and the phone's assistant gesture opens PocketLM ready to type. If you allow it to use text and a screenshot from the screen in the phone's assistant settings, the gesture opens a fresh chat with what was on your screen attached, and the question "What is on my screen?" ready (password fields are left out)
 - Diagnostics: a report to copy into a bug report, with your device, why the app last closed (for example Android ending it because memory ran low), any crash, and recent warnings and errors. Your messages are not written to the log
 - Model tools: let the model use a calculator, the date and time, a Wikipedia lookup, or a web search while it answers. Search with DuckDuckGo (nothing to set up), Brave Search (with your own free API key) or a SearXNG server you choose (off by default; the model asks with a short tag, the app runs the tool and hands back the result)
 - Compact memory cache: store the model's memory of the chat in 8 or 4 bits instead of 16 (about half or a quarter of the RAM), for a longer context or a bigger model. If the engine cannot do it, the normal cache is used and you are told
 - Generation: temperature, top-p, top-k, min-p, repeat penalty, seed, context length, CPU threads (applied when a model loads or a new chat starts), and max reply length (applies to the next reply)
+- Performance presets: Battery saver, Balanced, Fast and Long chats set threads, context length, memory cache size and reply length together; changing any of them by hand shows "Custom"
 - Stop words: end a reply as soon as one appears (applies immediately)
 - System prompt presets: four built in, plus your own
 - App lock: require fingerprint, face or screen lock; also hides the app in recent apps and blocks screenshots
@@ -102,6 +107,9 @@ curl http://PHONE_IP:8080/v1/chat/completions \
 - Slow down when hot or low on battery (on by default): while the phone is warm or the battery is low and not charging, the model uses fewer threads and replies are capped at 768 tokens (384 when very hot or the battery is nearly flat), then everything goes back to normal. The context length is not changed, since that needs the model to load again. API requests keep the length they asked for
 
 ## Known limits
+
+- New and untested on a device: dictation with a speech model (it uses llama.cpp's support for Qwen3-ASR, so how long it takes after you stop speaking on a mid-range phone is unmeasured), asking about the screen (the phone only shares the screen if you allow it in its assistant settings, and some apps block it), replying from a notification, the extra text-selection entries, projects, characters, performance presets, checksum checks, Wi-Fi-only downloads and the online model list
+- Projects, characters you make yourself and the performance presets stay on the phone; a chat that belongs to a project shows no project on a phone that does not have it. Checksums can only be checked for Hugging Face downloads
 
 - Also new and untested on a device: the compact memory cache, the thinking switch (it starts the answer with an empty thinking section, for models whose chat template mentions thinking), incognito chats, sharing files and links in, search in a chat and starred messages, text size and the two-pane layout, suggested notes, and API tool calls
 - API tool calls are done by describing the functions to the model in its instructions in the `<tool_call>` form that Qwen, Hermes and Llama 3.1 models know, so they only work with models that follow it. A request with tools is answered once the model has finished, even when streaming is asked for

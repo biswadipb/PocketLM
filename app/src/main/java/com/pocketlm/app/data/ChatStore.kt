@@ -66,6 +66,8 @@ data class SavedChat(
     val jsonSchema: String? = null,
     /** Labels the user gave this chat, used to filter History. See [ChatTags]. */
     val tags: List<String> = emptyList(),
+    /** The project this chat belongs to (see [Project]), or null. Projects stay on the phone that made them. */
+    val projectId: String? = null,
     /** False when the user switched off the thinking section of a reasoning model for this chat. */
     val thinking: Boolean = true,
     /** Whether this chat searches the user's notes folder; null follows the app-wide choice at the time. */
@@ -114,6 +116,7 @@ object ChatCodec {
         .put("jsonMode", chat.jsonMode)
         .put("jsonSchema", chat.jsonSchema ?: JSONObject.NULL)
         .apply { if (chat.tags.isNotEmpty()) put("tags", JSONArray(chat.tags)) }
+        .apply { chat.projectId?.let { put("projectId", it) } }
         .apply { if (!chat.thinking) put("thinking", false) }
         .apply { chat.useNotes?.let { put("useNotes", it) } }
         .put(
@@ -157,6 +160,7 @@ object ChatCodec {
             jsonMode = o.optBoolean("jsonMode", false),
             jsonSchema = if (o.isNull("jsonSchema")) null else o.optString("jsonSchema").ifEmpty { null },
             tags = ChatTags.clean(List(tagList?.length() ?: 0) { tagList!!.optString(it) }),
+            projectId = o.optString("projectId", "").ifEmpty { null },
             thinking = o.optBoolean("thinking", true),
             useNotes = if (o.has("useNotes")) o.optBoolean("useNotes") else null,
             attachments = List(att?.length() ?: 0) {

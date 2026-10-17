@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
@@ -109,6 +110,9 @@ fun HistoryScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var tagFilter by rememberSaveable { mutableStateOf<String?>(null) }
     var tagging by remember { mutableStateOf<SavedChat?>(null) }
+    var showProjects by remember { mutableStateOf(false) }
+    val projects by vm.projects.collectAsStateWithLifecycle()
+    val attachStatus by vm.attachStatus.collectAsStateWithLifecycle()
     var renaming by remember { mutableStateOf<SavedChat?>(null) }
     var saving by remember { mutableStateOf<SavedChat?>(null) }
     val context = LocalContext.current
@@ -140,6 +144,22 @@ fun HistoryScreen(
         )
     }
 
+    if (showProjects) {
+        ProjectsDialog(
+            projects = projects,
+            chats = chats,
+            busyReading = attachStatus,
+            onCreate = vm::createProject,
+            onUpdate = vm::updateProject,
+            onDelete = vm::deleteProject,
+            onAddDocument = vm::addProjectDocument,
+            onRemoveDocument = vm::removeProjectDocument,
+            onStartChat = { vm.startChatInProject(it); showProjects = false; onOpened() },
+            onOpenChat = { vm.openChat(it); showProjects = false; onOpened() },
+            onDismiss = { showProjects = false },
+        )
+    }
+
     Column(modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("History") },
@@ -151,6 +171,9 @@ fun HistoryScreen(
                 }
             },
             actions = {
+                IconButton(onClick = { showProjects = true }) {
+                    Icon(Icons.Filled.Folder, contentDescription = "Projects")
+                }
                 IconButton(onClick = onOpenStarred) {
                     Icon(Icons.Outlined.StarBorder, contentDescription = "Starred messages")
                 }

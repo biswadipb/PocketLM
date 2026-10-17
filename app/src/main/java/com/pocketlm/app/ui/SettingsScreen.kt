@@ -57,6 +57,7 @@ import com.pocketlm.app.data.Preset
 import java.util.UUID
 import com.pocketlm.app.data.MemoryNotes
 import com.pocketlm.app.data.OcrScript
+import com.pocketlm.app.data.SpeedPreset
 import com.pocketlm.app.data.SearchProvider
 import com.pocketlm.app.data.Note
 import com.pocketlm.app.PocketAssist
@@ -88,6 +89,9 @@ fun SettingsScreen(
     val braveKey by vm.braveKey.collectAsStateWithLifecycle()
     val notes by vm.notes.collectAsStateWithLifecycle()
     val ocrScript by vm.ocrScript.collectAsStateWithLifecycle()
+    val speedPreset by vm.speedPreset.collectAsStateWithLifecycle()
+    val wifiOnly by vm.wifiOnly.collectAsStateWithLifecycle()
+    val catalogUpdates by vm.catalogUpdates.collectAsStateWithLifecycle()
     val ocrStatus by vm.ocrStatus.collectAsStateWithLifecycle()
     val saveStates by vm.saveStates.collectAsStateWithLifecycle()
     var editingNote by remember { mutableStateOf<Note?>(null) }
@@ -380,6 +384,40 @@ fun SettingsScreen(
             }
             TextButton(onClick = { addingNote = true }) { Text("Add a note") }
 
+            SectionTitle("Model downloads", Modifier.padding(top = 24.dp))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Download on Wi-Fi only")
+                    Text(
+                        "Models are large. With this on, a download will not start on mobile data, and one in progress pauses " +
+                            "(keeping what arrived) if the phone switches to mobile data.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = wifiOnly, onCheckedChange = vm::setWifiOnly)
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Update the model list from the internet")
+                    Text(
+                        "When you open Models, PocketLM reads a small list in its repository on GitHub (at most twice a day) so " +
+                            "new models can appear without a new version of the app. GitHub sees your address; nothing else is sent. " +
+                            "Only Hugging Face and ModelScope download links in it are accepted.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = catalogUpdates, onCheckedChange = vm::setCatalogUpdates)
+            }
+            Text(
+                "Models from Hugging Face are checked against the checksum it publishes when the download finishes; a file " +
+                    "that does not match is deleted. Models from other sites, and files you import, are not checked.",
+                Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             SectionTitle("Text recognition", Modifier.padding(top = 24.dp))
             Text(
                 "Scanned PDFs and photos are read as text on your phone. Pick the writing system your documents use. " +
@@ -502,6 +540,7 @@ fun SettingsScreen(
                 }
                 Switch(checked = readAloud, onCheckedChange = vm::setReadAloud)
             }
+            OfflineDictationSection(vm)
 
             SectionTitle("Privacy", Modifier.padding(top = 24.dp))
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -536,6 +575,14 @@ fun SettingsScreen(
                     else "Make PocketLM your default assistant",
                 )
             }
+            Text(
+                "With PocketLM as your assistant you can ask about what is on your screen: use the assistant gesture, and " +
+                    "PocketLM opens a chat with the screen's text and a screenshot attached. In the phone's assistant settings, " +
+                    "allow it to use text and a screenshot from the screen. The screen is only read when you use the gesture, and " +
+                    "stays on the phone. Password fields and apps that block screen capture are left out.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             TextButton(onClick = onOpenStorage, Modifier.fillMaxWidth()) {
                 Text("Storage and cleanup", Modifier.weight(1f))
             }
@@ -567,7 +614,7 @@ fun SettingsScreen(
                     ) {
                         RadioButton(selected = preset.id == selectedId, onClick = null)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                            Text(preset.name)
+                            Text(preset.title)
                             Text(
                                 preset.prompt,
                                 maxLines = 2,
@@ -597,6 +644,31 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text("Preset", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelLarge)
+            Column(Modifier.selectableGroup()) {
+                SpeedPreset.entries.forEach { preset ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .selectable(selected = preset == speedPreset, onClick = { vm.applySpeedPreset(preset) }, role = Role.RadioButton)
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = preset == speedPreset, onClick = null)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(preset.label)
+                            Text(preset.blurb, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            if (speedPreset == null) {
+                Text(
+                    "Custom: your own mix of the settings below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
                 GenerationControls(params, maxThreads, vm::setGenerationParams)
@@ -627,9 +699,11 @@ fun SettingsScreen(
 private fun PresetDialog(initial: Preset, onSave: (Preset) -> Unit, onDismiss: () -> Unit) {
     var name by remember { mutableStateOf(initial.name) }
     var prompt by remember { mutableStateOf(initial.prompt) }
+    var greeting by remember { mutableStateOf(initial.greeting) }
+    var emoji by remember { mutableStateOf(initial.emoji) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial.name.isEmpty()) "New preset" else "Edit preset") },
+        title = { Text(if (initial.name.isEmpty()) "New preset or character" else "Edit preset") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
@@ -645,11 +719,25 @@ private fun PresetDialog(initial: Preset, onSave: (Preset) -> Unit, onDismiss: (
                     minLines = 4,
                     maxLines = 8,
                 )
+                OutlinedTextField(
+                    value = greeting,
+                    onValueChange = { greeting = it },
+                    label = { Text("Greeting (makes it a character)") },
+                    supportingText = { Text("What it says first when you start a chat as it. Leave empty for a plain preset.") },
+                    minLines = 2,
+                    maxLines = 4,
+                )
+                OutlinedTextField(
+                    value = emoji,
+                    onValueChange = { emoji = it.take(4) },
+                    label = { Text("Emoji (optional)") },
+                    singleLine = true,
+                )
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onSave(initial.copy(name = name.trim(), prompt = prompt.trim())) },
+                onClick = { onSave(initial.copy(name = name.trim(), prompt = prompt.trim(), greeting = greeting.trim(), emoji = emoji.trim())) },
                 enabled = name.isNotBlank() && prompt.isNotBlank(),
             ) { Text("Save") }
         },

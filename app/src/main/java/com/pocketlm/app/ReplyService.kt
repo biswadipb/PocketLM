@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,6 +16,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.pocketlm.app.data.SpeechText
@@ -23,6 +25,20 @@ import com.pocketlm.app.data.SpeechText
 object ReplyGateway {
     @Volatile
     var stopRequested: (() -> Unit)? = null
+
+    /** Sends a message typed into the "reply ready" notification. Returns false if the chat can't take it right now. */
+    @Volatile
+    var onNotificationReply: ((String) -> Boolean)? = null
+}
+
+/** Receives what you type into the "reply ready" notification. */
+class ReplyActionReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(ReplyNotifier.KEY_REPLY)?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) return
+        val accepted = ReplyGateway.onNotificationReply?.invoke(text) == true
+        ReplyNotifier.afterReply(context, text, accepted)
+    }
 }
 
 /**
@@ -104,6 +120,40 @@ object ReplyNotifier {
         return if (plain.length <= maxChars) plain else plain.take(maxChars - 1).trimEnd() + "…"
     }
 
+    const val KEY_REPLY = "reply_text"
+
+    private fun replyAction(context: Context): NotificationCompat.Action {
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
+        val send = PendingIntent.getBroadcast(context, 5, Intent(context, ReplyActionReceiver::class.java), flags)
+        return NotificationCompat.Action.Builder(0, "Reply", send)
+            .addRemoteInput(RemoteInput.Builder(KEY_REPLY).setLabel("Reply to PocketLM").build())
+            .setAllowGeneratedReplies(false)
+            .build()
+    }
+
+    /**
+     * Updates the notification after a reply was typed into it. If the chat took it, the notification says the answer
+     * is being written; if not (the app is closed or locked), tapping it opens PocketLM with the text in the box.
+     */
+    fun afterReply(context: Context, text: String, accepted: Boolean) {
+        val allowed = Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (!allowed) return
+        val open = PendingIntent.getActivity(
+            context, 6,
+            Intent(context, MainActivity::class.java).setAction(IntentActions.ASK).putExtra(Intent.EXTRA_TEXT, text),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val builder = NotificationCompat.Builder(context, CHANNEL_DONE)
+            .setSmallIcon(R.drawable.ic_tile)
+            .setContentTitle(if (accepted) "PocketLM is writing the reply" else "Open PocketLM to send your reply")
+            .setContentText(preview(text))
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+        if (!accepted) builder.setContentIntent(open)
+        runCatching { NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, builder.build()) }
+    }
+
     fun replyReady(context: Context, chatTitle: String, reply: String) {
         val allowed = Build.VERSION.SDK_INT < 33 ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
@@ -122,6 +172,7 @@ object ReplyNotifier {
             .setStyle(NotificationCompat.BigTextStyle().bigText(preview(reply, 400)))
             .setAutoCancel(true)
             .setContentIntent(open)
+            .addAction(replyAction(context))
             .build()
         runCatching { NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification) }
     }

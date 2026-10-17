@@ -8,6 +8,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.core.content.IntentCompat
 import com.pocketlm.app.data.ShareIntake
+import com.pocketlm.app.data.TextAction
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.result.contract.ActivityResultContracts
@@ -138,6 +139,10 @@ class MainActivity : FragmentActivity() {
     /** Text shared from another app, or selected and sent through the text selection menu. */
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
+        if (intent.action == IntentActions.ASK_SCREEN) {
+            vm.receiveScreen(intent.getStringExtra(IntentActions.EXTRA_SCREEN_TEXT), intent.getStringExtra(IntentActions.EXTRA_SCREENSHOT))
+            return
+        }
         // Files and photos shared in (a PDF from a mail app, a picture from the gallery) go into a fresh chat.
         val files: List<Uri> = when (intent.action) {
             Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
@@ -151,7 +156,12 @@ class MainActivity : FragmentActivity() {
         }
         val text = when (intent.action) {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
-            Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
+            Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()?.let { selected ->
+                // "Explain / Translate / Summarise / Improve with PocketLM" arrive through their own menu entries.
+                TextAction.fromComponent(intent.component?.className)?.promptFor(selected) ?: selected
+            }
+            // A reply typed into a notification that the app could not take on the spot.
+            IntentActions.ASK -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         }
         if (!text.isNullOrBlank()) {

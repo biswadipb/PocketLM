@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.material3.OutlinedTextField
 import com.pocketlm.app.data.JsonSchema
 import com.pocketlm.app.data.Preset
+import com.pocketlm.app.data.Project
 
 /** Settings that belong to one chat: its model, its system prompt, and JSON-only replies. */
 @Composable
@@ -45,6 +46,9 @@ fun ChatOptionsDialog(
     notesFolder: String?,
     useNotes: Boolean,
     onUseNotes: (Boolean) -> Unit,
+    projects: List<Project>,
+    projectId: String?,
+    onProject: (String?) -> Unit,
     onModel: (LocalModel) -> Unit,
     onPreset: (String?) -> Unit,
     onJsonMode: (Boolean) -> Unit,
@@ -76,6 +80,14 @@ fun ChatOptionsDialog(
                 Column(Modifier.selectableGroup()) {
                     models.forEach { m ->
                         Choice(m.fileName.removeSuffix(".gguf"), selected = m.path == loaded?.path) { onModel(m) }
+                    }
+                }
+
+                if (projects.isNotEmpty()) {
+                    Heading("Project")
+                    Column(Modifier.selectableGroup()) {
+                        Choice("None", selected = projectId == null) { onProject(null) }
+                        projects.forEach { p -> Choice(p.name, selected = projectId == p.id) { onProject(p.id) } }
                     }
                 }
 

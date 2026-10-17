@@ -12,7 +12,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.coroutineContext
 
-data class LocalModel(val fileName: String, val path: String, val sizeBytes: Long)
+/** A model on the phone. [verified] is true when its SHA-256 matched the one the model site publishes. */
+data class LocalModel(val fileName: String, val path: String, val sizeBytes: Long, val verified: Boolean = false)
 
 /** Manages GGUF files in the app's private storage. */
 class ModelStore(private val context: Context) {
@@ -29,10 +30,11 @@ class ModelStore(private val context: Context) {
         dir.listFiles { f -> f.isFile && f.name.endsWith(".gguf") && accept(f.name) }
             .orEmpty()
             .sortedBy { it.name.lowercase() }
-            .map { LocalModel(it.name, it.absolutePath, it.length()) }
+            .map { LocalModel(it.name, it.absolutePath, it.length(), File(dir, it.name + VERIFIED_SUFFIX).exists()) }
     }
 
     suspend fun delete(fileName: String) = withContext(Dispatchers.IO) {
+        File(dir, fileName + VERIFIED_SUFFIX).delete()
         File(dir, fileName).delete()
     }
 
@@ -40,8 +42,17 @@ class ModelStore(private val context: Context) {
      * Downloads [url] to the models folder, resuming a partial download when the server allows it.
      * [onProgress] receives (bytesDone, totalBytes); total is -1 when unknown.
      */
-    suspend fun download(url: String, fileName: String, onProgress: (Long, Long) -> Unit) =
-        Downloader.download(url, File(dir, fileName), File(dir, "$fileName.part"), onProgress)
+    suspend fun download(url: String, fileName: String, onProgress: (Long, Long) -> Unit): Downloader.Verified {
+        File(dir, fileName + VERIFIED_SUFFIX).delete()
+        val result = Downloader.download(url, File(dir, fileName), File(dir, "$fileName.part"), onProgress)
+        if (result == Downloader.Verified.Yes) File(dir, fileName + VERIFIED_SUFFIX).writeText("sha256 matched")
+        return result
+    }
+
+    private companion object {
+        /** An empty marker file beside a model whose checksum matched. */
+        const val VERIFIED_SUFFIX = ".verified"
+    }
 
     /** Copies a model picked with the system file picker into private storage. */
     suspend fun import(uri: Uri): String = withContext(Dispatchers.IO) {

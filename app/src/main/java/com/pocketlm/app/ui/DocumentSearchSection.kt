@@ -33,6 +33,7 @@ internal fun DocumentSearchSection(vm: PocketViewModel) {
     val installed by vm.embeddingModels.collectAsStateWithLifecycle()
     val note by vm.embeddingNote.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
+    val embeddingCatalog by vm.embeddingCatalog.collectAsStateWithLifecycle()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
     SectionTitle("Document search", Modifier.padding(top = 24.dp))
@@ -56,7 +57,7 @@ internal fun DocumentSearchSection(vm: PocketViewModel) {
     }
     note?.let { Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
 
-    val missing = ModelCatalog.embeddings.filter { c -> installed.none { it.fileName == c.fileName } }
+    val missing = embeddingCatalog.filter { c -> installed.none { it.fileName == c.fileName } }
     if (missing.isNotEmpty()) {
         Text("Download a search model", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelLarge)
         missing.forEach { c ->

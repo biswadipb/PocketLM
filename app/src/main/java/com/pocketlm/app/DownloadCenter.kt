@@ -2,6 +2,9 @@ package com.pocketlm.app
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import androidx.core.content.ContextCompat
 import com.pocketlm.app.data.ModelStore
 import kotlinx.coroutines.CancellationException
@@ -41,9 +44,46 @@ class DownloadCenter private constructor(private val context: Context) {
     private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 16)
     val events: SharedFlow<Event> = _events.asSharedFlow()
 
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private var watching: ConnectivityManager.NetworkCallback? = null
+
+    /** True when the user asked for downloads on Wi-Fi only (or any other connection that is not billed by use). */
+    private val wifiOnly get() = prefs.getBoolean(KEY_WIFI_ONLY, false)
+
+    /** Stops the downloads in progress, keeping what has arrived, when the connection turns into mobile data. */
+    private fun watchConnection() {
+        if (watching != null) return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                if (wifiOnly && !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) pauseForMobileData()
+            }
+        }
+        watching = callback
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+    }
+
+    private fun stopWatching() {
+        watching?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
+        watching = null
+    }
+
+    private fun pauseForMobileData() {
+        for ((fileName, job) in jobs.entries.toList()) {
+            if (!job.isActive) continue
+            job.cancel()
+            _events.tryEmit(Event.Failed(fileName, PAUSED_FOR_MOBILE_DATA))
+        }
+    }
+
     fun start(url: String, fileName: String) {
         val previous = jobs[fileName]
         if (previous?.isActive == true) return
+        if (wifiOnly && connectivity.isActiveNetworkMetered) {
+            _events.tryEmit(Event.Failed(fileName, NEEDS_WIFI))
+            return
+        }
+        watchConnection()
         _downloads.update { it + (fileName to DownloadState(null)) }
         // If the system refuses a foreground service the download still runs, just without the notification.
         runCatching { ContextCompat.startForegroundService(context, Intent(context, DownloadService::class.java)) }
@@ -67,6 +107,7 @@ class DownloadCenter private constructor(private val context: Context) {
             } finally {
                 // Only clear the state if a newer download of this file has not taken over.
                 if (jobs.remove(fileName, self)) _downloads.update { it - fileName }
+                if (jobs.values.none { it.isActive && it !== self }) stopWatching()
             }
         }
     }
@@ -80,6 +121,10 @@ class DownloadCenter private constructor(private val context: Context) {
     }
 
     companion object {
+        const val KEY_WIFI_ONLY = "downloads_wifi_only"
+        const val NEEDS_WIFI = "Downloads are set to Wi-Fi only and this connection is mobile data. Connect to Wi-Fi, or turn that setting off."
+        const val PAUSED_FOR_MOBILE_DATA = "Paused because the connection changed to mobile data. Start the download again on Wi-Fi to carry on where it stopped."
+
         @Volatile
         private var instance: DownloadCenter? = null
 

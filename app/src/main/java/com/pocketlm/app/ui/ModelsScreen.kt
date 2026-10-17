@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +84,9 @@ fun ModelsScreen(
     val gpuDisabled by vm.gpuDisabled.collectAsStateWithLifecycle()
     val probingGpus by vm.probingGpus.collectAsStateWithLifecycle()
     val gpuStatus by vm.gpuStatus.collectAsStateWithLifecycle()
+    val catalog by vm.catalog.collectAsStateWithLifecycle()
+    val onlineCount by vm.onlineModelCount.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.refreshCatalog() }
     val context = LocalContext.current
     val memory = rememberMemoryInfo(models)
     var url by rememberSaveable { mutableStateOf("") }
@@ -170,6 +174,7 @@ fun ModelsScreen(
                     projectors = projectors,
                     projector = projectorChoice[m.fileName],
                     onProjector = { vm.setProjector(m, it) },
+                    verified = m.verified,
                     hasOwnSettings = own != null,
                     runningOn = if (loaded?.path == m.path && gpuStatus.text.isNotEmpty()) {
                         (if (gpuStatus.onGpu) "Running on the GPU: " else "GPU not used: ") + gpuStatus.text
@@ -188,8 +193,17 @@ fun ModelsScreen(
             val levelOf = { c: CatalogModel ->
                 MemoryEstimate.estimate(c.sizeMb * 1024L * 1024L, null, gen.contextSize, memory.availMem, memory.totalMem, gen.cacheBits).level
             }
-            val recommended = Recommendation.pick(ModelCatalog.models, levelOf)
-            items(ModelCatalog.models, key = { it.fileName }) { c ->
+            val recommended = Recommendation.pick(catalog, levelOf)
+            if (onlineCount > 0) {
+                item {
+                    Text(
+                        "$onlineCount more ${if (onlineCount == 1) "model" else "models"} from PocketLM's online list.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            items(catalog, key = { it.fileName }) { c ->
                 CatalogCard(
                     level = levelOf(c),
                     recommended = c == recommended,
@@ -250,6 +264,7 @@ private fun LocalModelCard(
     projectors: List<LocalModel>,
     projector: String?,
     onProjector: (String?) -> Unit,
+    verified: Boolean,
     hasOwnSettings: Boolean,
     runningOn: String?,
     onSettings: () -> Unit,
@@ -276,6 +291,9 @@ private fun LocalModelCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = fitColor,
             )
+            if (verified) {
+                Text("Checksum verified: this is the file the model site published", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
             runningOn?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }

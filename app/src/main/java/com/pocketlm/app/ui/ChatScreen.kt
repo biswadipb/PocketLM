@@ -79,6 +79,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pocketlm.app.ChatMessage
+import com.pocketlm.app.DictationState
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.compose.material.icons.filled.RecordVoiceOver
@@ -103,6 +104,8 @@ import com.pocketlm.app.data.ThrottlePolicy
 import com.pocketlm.app.data.ContextMeter
 import com.pocketlm.app.data.GenStats
 import com.pocketlm.app.data.Thinking
+import com.pocketlm.app.data.Presets
+import androidx.compose.material3.AssistChip
 import com.pocketlm.app.data.PromptRecord
 import com.pocketlm.app.data.Variants
 import com.pocketlm.app.data.Summaries
@@ -129,6 +132,9 @@ fun ChatScreen(
     val pendingImages by vm.pendingImages.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ChatMessage?>(null) }
     val incoming by vm.incomingText.collectAsStateWithLifecycle()
+    val dictationState by vm.dictation.collectAsStateWithLifecycle()
+    val offlineDictation by vm.offlineDictationReady.collectAsStateWithLifecycle()
+    val dictated by vm.dictatedText.collectAsStateWithLifecycle()
     val askRequests by vm.askRequests.collectAsStateWithLifecycle()
     val inputFocus = remember { FocusRequester() }
     val speakingId by vm.speakingId.collectAsStateWithLifecycle()
@@ -138,6 +144,8 @@ fun ChatScreen(
     val cutOffId by vm.cutOffId.collectAsStateWithLifecycle()
     val attachStatus by vm.attachStatus.collectAsStateWithLifecycle()
     val presets by vm.presets.collectAsStateWithLifecycle()
+    val projects by vm.projects.collectAsStateWithLifecycle()
+    val chatProjectId by vm.chatProjectId.collectAsStateWithLifecycle()
     val chatPresetId by vm.chatPresetId.collectAsStateWithLifecycle()
     val defaultPresetId by vm.selectedPresetId.collectAsStateWithLifecycle()
     val jsonMode by vm.jsonMode.collectAsStateWithLifecycle()
@@ -216,6 +224,18 @@ fun ChatScreen(
         }
     }
 
+    // Words written down from your voice by the speech model on the phone.
+    LaunchedEffect(dictated) {
+        dictated?.let {
+            input = if (input.isBlank()) it else input.trimEnd() + " " + it
+            vm.consumeDictatedText()
+        }
+    }
+    val dictationMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.toggleDictation()
+        else vm.reportError("Dictation needs the microphone. You can allow it in the phone's settings.")
+    }
+
     if (showOptions) {
         ChatOptionsDialog(
             models = models,
@@ -231,6 +251,9 @@ fun ChatScreen(
             notesFolder = notesStatus.folderName,
             useNotes = useNotes,
             onUseNotes = vm::setUseNotes,
+            projects = projects,
+            projectId = chatProjectId,
+            onProject = vm::setChatProject,
             onModel = vm::switchModel,
             onPreset = vm::setChatPreset,
             onJsonMode = vm::setJsonMode,
@@ -456,6 +479,23 @@ fun ChatScreen(
                     }
                 }
             }
+            val characters = remember(presets) { Presets.characters(presets) }
+            if (loaded != null && !loading && messages.isEmpty() && characters.isNotEmpty()) {
+                Column(
+                    Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("Or start a chat as…", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        characters.forEach { character ->
+                            AssistChip(onClick = { vm.startChatAs(character) }, label = { Text(character.title) })
+                        }
+                    }
+                }
+            }
         }
 
         if (pendingImages.isNotEmpty()) {
@@ -501,6 +541,15 @@ fun ChatScreen(
                     )
                 }
             }
+        }
+        if (dictationState != DictationState.Idle) {
+            Text(
+                if (dictationState == DictationState.Listening) "Listening… tap the red square when you have finished."
+                else "Writing down what you said…",
+                Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
         if (usage.total > 0) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
@@ -566,18 +615,33 @@ fun ChatScreen(
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
                 trailingIcon = {
-                    if (input.isEmpty() && loaded != null && !generating && !loading) {
-                        IconButton(onClick = {
-                            val ask = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message")
+                    if ((input.isEmpty() || dictationState != DictationState.Idle) && loaded != null && !generating && !loading) {
+                        when (dictationState) {
+                            DictationState.Transcribing -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                            DictationState.Listening -> IconButton(onClick = vm::toggleDictation) {
+                                Icon(Icons.Filled.Stop, contentDescription = "Finish dictating", tint = MaterialTheme.colorScheme.error)
                             }
-                            try {
-                                dictation.launch(ask)
-                            } catch (e: ActivityNotFoundException) {
-                                vm.reportError("No speech recognition app is installed on this phone.")
-                            }
-                        }) { Icon(Icons.Filled.Mic, contentDescription = "Dictate a message") }
+                            DictationState.Idle -> IconButton(onClick = {
+                                if (offlineDictation) {
+                                    // The speech model on the phone writes down what you say; nothing leaves the phone.
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        vm.toggleDictation()
+                                    } else {
+                                        dictationMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                } else {
+                                    val ask = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message")
+                                    }
+                                    try {
+                                        dictation.launch(ask)
+                                    } catch (e: ActivityNotFoundException) {
+                                        vm.reportError("No speech recognition app is installed on this phone.")
+                                    }
+                                }
+                            }) { Icon(Icons.Filled.Mic, contentDescription = "Dictate a message") }
+                        }
                     }
                 },
             )

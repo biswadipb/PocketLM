@@ -14,6 +14,11 @@ import android.widget.RemoteViews
 object IntentActions {
     /** Opens the chat with the message box focused. Used by the tile, widget and app shortcut. */
     const val ASK = "com.pocketlm.app.ASK"
+
+    /** Opens a fresh chat with what was on the screen when the assistant gesture was used. */
+    const val ASK_SCREEN = "com.pocketlm.app.ASK_SCREEN"
+    const val EXTRA_SCREEN_TEXT = "screen_text"
+    const val EXTRA_SCREENSHOT = "screenshot_path"
 }
 
 private fun askIntent(context: Context) =

@@ -4,4 +4,8 @@
     <string name="ask_short">Ask</string>
     <string name="widget_text">Ask PocketLM…</string>
     <string name="widget_description">Opens PocketLM ready for your question</string>
+    <string name="text_explain">Explain with PocketLM</string>
+    <string name="text_translate">Translate with PocketLM</string>
+    <string name="text_summarise">Summarise with PocketLM</string>
+    <string name="text_improve">Improve with PocketLM</string>
 </resources>

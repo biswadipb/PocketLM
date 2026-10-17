@@ -87,7 +87,6 @@ import com.pocketlm.app.data.ApiTools
 import com.pocketlm.app.data.BenchResult
 import com.pocketlm.app.data.ChatRequest
 import com.pocketlm.app.data.Bm25Index
-import com.pocketlm.app.data.CatalogModel
 import com.pocketlm.app.data.ChatExport
 import com.pocketlm.app.data.ChatStore
 import com.pocketlm.app.data.DeviceStatus
@@ -116,7 +115,20 @@ import com.pocketlm.app.data.ModelStore
 import com.pocketlm.app.data.Preset
 import com.pocketlm.app.data.GpuChoice
 import com.pocketlm.app.data.GpuGuard
+import com.pocketlm.app.data.CatalogModel
+import com.pocketlm.app.data.CatalogStore
+import com.arm.aichat.SpeechException
+import com.pocketlm.app.data.Audio
+import com.pocketlm.app.data.MicRecorder
 import com.pocketlm.app.data.Ocr
+import com.pocketlm.app.data.SpeechModels
+import com.pocketlm.app.data.Transcript
+import com.pocketlm.app.data.Projects
+import com.pocketlm.app.data.ProjectStore
+import com.pocketlm.app.data.Project
+import com.pocketlm.app.data.RemoteCatalog
+import com.pocketlm.app.data.SpeedPreset
+import com.pocketlm.app.data.SpeedPresets
 import com.pocketlm.app.data.SearchConfig
 import com.pocketlm.app.data.SearchProvider
 import com.pocketlm.app.data.SelfSignedCertificate
@@ -145,6 +157,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -192,6 +205,9 @@ data class ApiCertificate(val fingerprint: String, val pem: String, val expiresM
 data class RepoFiles(val files: List<HfFile>? = null, val error: String? = null)
 
 enum class ComparePhase { Waiting, Loading, Generating, Done, Failed }
+
+/** What dictation on the phone is doing: nothing, recording your voice, or writing it down. */
+enum class DictationState { Idle, Listening, Transcribing }
 
 /** One model's side of a comparison. */
 data class CompareSide(
@@ -780,7 +796,10 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         val chats = chatStore.list().also { _chats.value = it }
         val images = (chats.flatMap { c -> c.messages.flatMap { it.images } } +
             _messages.value.flatMap { it.images } + _pendingImages.value).toSet()
-        val documents = (chats.flatMap { c -> c.attachments.map { it.id } } + _attachments.value.map { it.id }).toSet()
+        val documents = (
+            chats.flatMap { c -> c.attachments.map { it.id } } + _attachments.value.map { it.id } +
+                _projects.value.flatMap { p -> p.documents.map { it.id } }
+            ).toSet()
         return images to documents
     }
 
@@ -870,6 +889,56 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Whether the API server uses HTTPS, with a certificate this phone makes for itself. */
     val apiHttps = _apiHttps.asStateFlow()
+
+    private val _wifiOnly = MutableStateFlow(prefs.getBoolean(DownloadCenter.KEY_WIFI_ONLY, false))
+
+    /** Whether model downloads wait for Wi-Fi (or another connection that is not billed by use). */
+    val wifiOnly = _wifiOnly.asStateFlow()
+
+    fun setWifiOnly(on: Boolean) {
+        _wifiOnly.value = on
+        prefs.edit().putBoolean(DownloadCenter.KEY_WIFI_ONLY, on).apply()
+    }
+
+    // ---- The model catalog, with the online additions -----------------------------------------
+
+    private val catalogStore = CatalogStore(app)
+    private val _remoteCatalog = MutableStateFlow<RemoteCatalog.Parsed?>(null)
+
+    private val _catalogUpdates = MutableStateFlow(prefs.getBoolean(KEY_CATALOG_UPDATES, true))
+
+    /** Whether the model list is refreshed from PocketLM's repository when Models is opened. */
+    val catalogUpdates = _catalogUpdates.asStateFlow()
+
+    fun setCatalogUpdates(on: Boolean) {
+        _catalogUpdates.value = on
+        prefs.edit().putBoolean(KEY_CATALOG_UPDATES, on).apply()
+    }
+
+    /** The built-in models plus any the online list adds. */
+    val catalog: StateFlow<List<CatalogModel>> = _remoteCatalog
+        .map { RemoteCatalog.merge(ModelCatalog.models, it?.models.orEmpty()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ModelCatalog.models)
+
+    /** The built-in search models plus any the online list adds. */
+    val embeddingCatalog: StateFlow<List<CatalogModel>> = _remoteCatalog
+        .map { RemoteCatalog.merge(ModelCatalog.embeddings, it?.embeddings.orEmpty()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ModelCatalog.embeddings)
+
+    /** How many models the online list added, for a line on the Models screen. */
+    val onlineModelCount: StateFlow<Int> = _remoteCatalog
+        .map { parsed -> parsed?.let { p -> p.models.count { m -> ModelCatalog.models.none { it.fileName == m.fileName } } } ?: 0 }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    /** Reads the saved online list, and fetches a fresh one if it is due and the setting is on. */
+    fun refreshCatalog() {
+        viewModelScope.launch {
+            if (_remoteCatalog.value == null) _remoteCatalog.value = withContext(Dispatchers.IO) { catalogStore.cached() }
+            if (_catalogUpdates.value && catalogStore.due()) {
+                catalogStore.refresh()?.let { _remoteCatalog.value = it }
+            }
+        }
+    }
 
     private val tlsStore = TlsStore(File(app.filesDir, ApiService.TLS_DIR))
 
@@ -1336,6 +1405,17 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Longest a reply may be, in tokens. Applies to the next reply. */
     val maxReplyTokens = _maxReplyTokens.asStateFlow()
 
+    /** The speed preset the current settings match exactly, or null when they are a custom mix. */
+    val speedPreset: StateFlow<SpeedPreset?> =
+        combine(_generationParams, _maxReplyTokens) { params, maxReply -> SpeedPresets.detect(params, maxReply) }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, SpeedPresets.detect(_generationParams.value, _maxReplyTokens.value))
+
+    /** Sets threads, context length, memory cache size and reply length together. Applies the next time a model loads. */
+    fun applySpeedPreset(preset: SpeedPreset) {
+        setGenerationParams(SpeedPresets.apply(_generationParams.value, preset))
+        setMaxReplyTokens(SpeedPresets.maxReplyFor(preset))
+    }
+
     fun setMaxReplyTokens(tokens: Int) {
         _maxReplyTokens.value = tokens
         prefs.edit().putInt(KEY_MAX_REPLY, tokens).apply()
@@ -1484,6 +1564,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     /** Called by the activity as it comes to the front and leaves it. */
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
+        if (!visible) cancelDictation()
     }
 
     // ---- Read aloud --------------------------------------------------------------
@@ -1690,11 +1771,25 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The preset's prompt, then what to remember about the user, then (when tools are on) how to ask for them. */
     private val chatSystemPrompt: String
-        get() = Tools.withInstructions(MemoryNotes.withNotes(selectedPrompt, _notes.value), _enabledTools.value)
+        get() = Tools.withInstructions(
+            Projects.withInstructions(MemoryNotes.withNotes(selectedPrompt, _notes.value), currentProject()),
+            _enabledTools.value,
+        )
 
     fun setChatPreset(id: String?) {
         _chatPresetId.value = id
         reloadKeepingChat()
+    }
+
+    /**
+     * Starts the empty chat as [character]: its prompt applies to this chat, and its greeting is already said, so the
+     * model carries on from it.
+     */
+    fun startChatAs(character: Preset) {
+        if (anythingRunning() || _messages.value.isNotEmpty() || _loadedModel.value == null) return
+        _chatPresetId.value = character.id
+        if (character.greeting.isNotBlank()) _messages.value = listOf(ChatMessage(character.greeting.trim(), false))
+        refreshSystemPrompt()
     }
 
     fun switchModel(model: LocalModel) {
@@ -1852,11 +1947,16 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshModels() {
         viewModelScope.launch {
-            val list = store.list()
+            val all = store.list()
+            val allProjectors = store.listProjectors()
+            // Speech models (for dictation) live in the same folder but are not chat models.
+            val list = all.filterNot { SpeechModels.isSpeechFile(it.fileName) }
             _models.value = list
-            _projectors.value = store.listProjectors()
+            _projectors.value = allProjectors.filterNot { SpeechModels.isSpeechFile(it.fileName) }
+            _speechModels.value = all.filter { SpeechModels.isSpeechFile(it.fileName) }
+            _speechProjectors.value = allProjectors.filter { SpeechModels.isSpeechFile(it.fileName) }
             // A catalog vision model comes with its own projector: pair them automatically.
-            ModelCatalog.models.forEach { c ->
+            catalog.value.forEach { c ->
                 val projector = c.projectorFileName ?: return@forEach
                 val model = list.firstOrNull { it.fileName == c.fileName } ?: return@forEach
                 if (_projectors.value.any { it.fileName == projector } && model.fileName !in _projectorChoice.value) {
@@ -2695,6 +2795,245 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         refreshDiagnostics()
     }
 
+    // ---- Projects -----------------------------------------------------------------------------
+
+    private val projectStore = ProjectStore(app)
+    private val _projects = MutableStateFlow(projectStore.load())
+
+    /** The user's projects: shared instructions and documents for the chats in them. */
+    val projects = _projects.asStateFlow()
+
+    private val _chatProjectId = MutableStateFlow<String?>(null)
+
+    /** The project the open chat belongs to, or null. */
+    val chatProjectId = _chatProjectId.asStateFlow()
+
+    private fun currentProject(): Project? = _chatProjectId.value?.let { id -> _projects.value.firstOrNull { it.id == id } }
+
+    /** The documents attached to this chat followed by those of its project. */
+    private fun allDocuments(): List<Attachment> = _attachments.value + currentProject()?.documents.orEmpty()
+
+    private fun changeProjects(change: (List<Project>) -> List<Project>) {
+        _projects.update(change)
+        projectStore.save(_projects.value)
+    }
+
+    /** Makes a project and returns its id, or null if [name] is blank. */
+    fun createProject(name: String, instructions: String): String? {
+        val clean = Projects.cleanName(name) ?: return null
+        val id = UUID.randomUUID().toString()
+        changeProjects { it + Project(id, clean, instructions.trim().take(Projects.MAX_INSTRUCTIONS)) }
+        return id
+    }
+
+    fun updateProject(id: String, name: String, instructions: String) {
+        val clean = Projects.cleanName(name) ?: return
+        changeProjects { list ->
+            list.map { if (it.id == id) it.copy(name = clean, instructions = instructions.trim().take(Projects.MAX_INSTRUCTIONS)) else it }
+        }
+        if (_chatProjectId.value == id) refreshForProjectChange()
+    }
+
+    /** Deletes the project and its documents. Chats that were in it stay, as chats without a project. */
+    fun deleteProject(project: Project) {
+        val wasCurrent = _chatProjectId.value == project.id
+        changeProjects { list -> list.filterNot { it.id == project.id } }
+        viewModelScope.launch { project.documents.forEach { docStore.delete(it.id) } }
+        if (wasCurrent) {
+            _chatProjectId.value = null
+            refreshForProjectChange()
+        }
+    }
+
+    fun addProjectDocument(projectId: String, uri: Uri) {
+        val project = _projects.value.firstOrNull { it.id == projectId } ?: return
+        if (project.documents.size >= Projects.MAX_DOCUMENTS) {
+            _error.value = "A project can hold up to ${Projects.MAX_DOCUMENTS} documents."
+            return
+        }
+        if (_attachStatus.value != null) return
+        viewModelScope.launch {
+            _attachStatus.value = "Reading the file…"
+            try {
+                val doc = docStore.import(uri) { _attachStatus.value = it }
+                changeProjects { list -> list.map { if (it.id == projectId) it.copy(documents = it.documents + doc) else it } }
+                if (_chatProjectId.value == projectId) rebuildDocIndex()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Could not add the file"
+            } finally {
+                _attachStatus.value = null
+            }
+        }
+    }
+
+    fun removeProjectDocument(projectId: String, doc: Attachment) {
+        changeProjects { list -> list.map { if (it.id == projectId) it.copy(documents = it.documents.filterNot { d -> d.id == doc.id }) else it } }
+        viewModelScope.launch {
+            docStore.delete(doc.id)
+            if (_chatProjectId.value == projectId) rebuildDocIndex()
+        }
+    }
+
+    /** Puts the open chat in a project, or takes it out of one. */
+    fun setChatProject(id: String?) {
+        _chatProjectId.value = id?.takeIf { wanted -> _projects.value.any { it.id == wanted } }
+        refreshForProjectChange()
+    }
+
+    /** Starts an empty chat in [project]. */
+    fun startChatInProject(project: Project) {
+        if (anythingRunning()) return
+        clearConversation()
+        _chatProjectId.value = project.id
+        refreshForProjectChange()
+    }
+
+    /** The model must be told the project's instructions again, and its documents searched. */
+    private fun refreshForProjectChange() {
+        contextStale = true
+        refreshSystemPrompt()
+        viewModelScope.launch { rebuildDocIndex() }
+        if (_messages.value.isNotEmpty()) saveCurrentChat()
+    }
+
+    // ---- Dictation on the phone -----------------------------------------------------------------
+
+    private val speech = AiChat.getSpeechEngine(app)
+    private val speechMutex = Mutex()
+    private val _speechModels = MutableStateFlow<List<LocalModel>>(emptyList())
+    private val _speechProjectors = MutableStateFlow<List<LocalModel>>(emptyList())
+    private val _speechModelFile = MutableStateFlow(prefs.getString(KEY_SPEECH_MODEL, "") ?: "")
+
+    /** File name of the speech model used for dictation, or empty to use the phone's own speech recogniser. */
+    val speechModelFile = _speechModelFile.asStateFlow()
+
+    /** Speech models on the phone that have their audio add-on too, so they can be used. */
+    val speechModels: StateFlow<List<LocalModel>> =
+        combine(_speechModels, _speechProjectors) { models, projectors -> models.filter { SpeechModels.projectorFor(it.fileName, projectors) != null } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** True when dictation will use the speech model on the phone rather than the phone's own recogniser. */
+    val offlineDictationReady: StateFlow<Boolean> =
+        combine(_speechModelFile, speechModels) { file, models -> file.isNotEmpty() && models.any { it.fileName == file } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private val _dictation = MutableStateFlow(DictationState.Idle)
+    val dictation = _dictation.asStateFlow()
+
+    private val _dictatedText = MutableStateFlow<String?>(null)
+
+    /** Words just written down from your voice, for the message box to take. */
+    val dictatedText = _dictatedText.asStateFlow()
+
+    fun consumeDictatedText() {
+        _dictatedText.value = null
+    }
+
+    private var recorder: MicRecorder? = null
+    private var speechUnloadJob: Job? = null
+
+    fun setSpeechModel(fileName: String) {
+        _speechModelFile.value = fileName
+        prefs.edit().putString(KEY_SPEECH_MODEL, fileName).apply()
+        if (fileName.isEmpty()) viewModelScope.launch { runCatching { speech.unload() } }
+    }
+
+    /** Starts recording your voice, or, if it is recording, stops and writes down what it heard. */
+    fun toggleDictation() {
+        when (_dictation.value) {
+            DictationState.Idle -> startListening()
+            DictationState.Listening -> finishListening()
+            DictationState.Transcribing -> Unit
+        }
+    }
+
+    private fun startListening() {
+        if (!offlineDictationReady.value) return
+        val mic = MicRecorder(onLimit = { viewModelScope.launch { if (_dictation.value == DictationState.Listening) finishListening() } })
+        if (!mic.start()) {
+            _error.value = "The microphone could not be used. Check that PocketLM may use it and that no other app is recording."
+            return
+        }
+        recorder = mic
+        _dictation.value = DictationState.Listening
+        speechUnloadJob?.cancel()
+        // The model loads while you speak, so it is ready when you finish.
+        viewModelScope.launch { ensureSpeechLoaded() }
+    }
+
+    private fun finishListening() {
+        val heard = recorder?.stop() ?: FloatArray(0)
+        recorder = null
+        _dictation.value = DictationState.Transcribing
+        viewModelScope.launch {
+            try {
+                val trimmed = Audio.trimSilence(heard, speech.sampleRate.takeIf { it > 0 } ?: 16_000)
+                if (trimmed.isEmpty()) {
+                    _error.value = "No speech was heard."
+                    return@launch
+                }
+                if (!ensureSpeechLoaded()) return@launch
+                val text = Transcript.clean(speech.transcribe(trimmed))
+                if (text.isEmpty()) _error.value = "No speech was heard." else _dictatedText.value = text
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = (e as? SpeechException)?.message ?: "Could not write down what you said: ${e.message ?: e::class.simpleName}"
+            } finally {
+                _dictation.value = DictationState.Idle
+                scheduleSpeechUnload()
+            }
+        }
+    }
+
+    /** Stops recording without using it, for example when the app is left. */
+    fun cancelDictation() {
+        if (_dictation.value != DictationState.Listening) return
+        recorder?.stop()
+        recorder = null
+        _dictation.value = DictationState.Idle
+        scheduleSpeechUnload()
+    }
+
+    private suspend fun ensureSpeechLoaded(): Boolean = speechMutex.withLock {
+        val model = _speechModels.value.firstOrNull { it.fileName == _speechModelFile.value }
+        val projector = model?.let { SpeechModels.projectorFor(it.fileName, _speechProjectors.value) }
+        if (model == null || projector == null) {
+            _error.value = "The speech model's files are missing. Download them again in Settings."
+            return@withLock false
+        }
+        if (speech.loadedPath == model.path) return@withLock true
+        try {
+            speech.load(model.path, projector.path)
+            true
+        } catch (e: SpeechException) {
+            _error.value = e.message
+            false
+        }
+    }
+
+    /** The speech model takes about a gigabyte of memory, so it is let go a couple of minutes after the last use. */
+    private fun scheduleSpeechUnload() {
+        speechUnloadJob?.cancel()
+        speechUnloadJob = viewModelScope.launch {
+            delay(SPEECH_KEEP_MS)
+            if (_dictation.value == DictationState.Idle) runCatching { speech.unload() }
+        }
+    }
+
+    // ---- Replying from the notification -------------------------------------------------------
+
+    /** Takes a message typed into the "reply ready" notification, unless the app is locked or busy. */
+    private val notificationReply: (String) -> Boolean = { text ->
+        !_locked.value && _loadedModel.value != null && !_loading.value && !_generating.value && send(text)
+    }
+
+    init {
+        ReplyGateway.onNotificationReply = notificationReply
+    }
+
     // ---- Text recognition language ------------------------------------------------------
 
     private val _ocrScript = MutableStateFlow(OcrScript.fromId(prefs.getString(KEY_OCR_SCRIPT, null)))
@@ -2797,6 +3136,51 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * What was on the screen when the assistant gesture was used: a fresh chat gets the screen's text as a document and
+     * the screenshot as a photo (or, if the model can't see, the words read from it), with a question ready to send.
+     */
+    fun receiveScreen(text: String?, screenshotPath: String?) {
+        viewModelScope.launch {
+            startFreshChat()
+            val shot = screenshotPath?.let(::File)?.takeIf { it.isFile }
+            try {
+                val words = text?.trim().orEmpty()
+                if (words.isNotEmpty()) {
+                    val doc = docStore.saveText("Screen text", words).also { noteIncognitoDoc(it) }
+                    _attachments.update { it + doc }
+                    rebuildDocIndex()
+                }
+                if (shot != null) {
+                    val uri = Uri.fromFile(shot)
+                    if (_visionReady.value) {
+                        attachImageNow(uri)
+                    } else if (words.isEmpty()) {
+                        // Nothing came as text and the model can't see: read the words out of the screenshot.
+                        _attachStatus.value = "Reading text in the screenshot…"
+                        val read = Ocr.recognize(getApplication(), uri) { _attachStatus.value = it }.trim()
+                        if (read.isNotEmpty()) {
+                            val doc = docStore.saveText("Screen text", read).also { noteIncognitoDoc(it) }
+                            _attachments.update { it + doc }
+                            rebuildDocIndex()
+                        }
+                    }
+                }
+                if (words.isEmpty() && shot == null) {
+                    _error.value = "The phone did not share the screen. In its assistant settings, allow PocketLM to use text and a screenshot from the screen."
+                }
+                _incomingText.value = "What is on my screen? Summarise it."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Could not read the screen"
+            } finally {
+                _attachStatus.value = null
+                shot?.delete()
+            }
+        }
+    }
+
     /** A link shared into PocketLM: its page is read into a fresh chat. */
     fun receiveLink(url: String) {
         viewModelScope.launch {
@@ -2833,7 +3217,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun rebuildDocIndex() {
-        val docs = _attachments.value.mapNotNull { a -> docStore.read(a.id)?.let { a.name to it } }
+        val docs = allDocuments().mapNotNull { a -> docStore.read(a.id)?.let { a.name to it } }
         vectorJob?.cancel()
         docVectors = null
         docIndex = if (docs.isEmpty()) null else withContext(Dispatchers.Default) { Bm25Index.build(docs) }
@@ -2917,7 +3301,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         docVectors = null
         val model = selectedEmbeddingModel() ?: return
         val index = docIndex ?: return
-        val attachments = _attachments.value
+        val attachments = allDocuments()
         vectorJob = viewModelScope.launch {
             try {
                 ensureEmbedder(model)
@@ -3237,6 +3621,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _promptRecord.value = null
         contextStale = false
         _attachments.value = emptyList()
+        _chatProjectId.value = null
         docIndex = null
         vectorJob?.cancel()
         docVectors = null
@@ -3268,6 +3653,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
             useNotes = _useNotes.value.takeIf { it != _notesDefault.value },
             jsonSchema = _jsonSchema.value,
             tags = existing?.tags ?: emptyList(),
+            projectId = _chatProjectId.value,
             modelFile = _loadedModel.value?.fileName,
             messages = msgs.map(::stored),
             attachments = _attachments.value,
@@ -3314,6 +3700,7 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         _thinking.value = chat.thinking
         _useNotes.value = chat.useNotes ?: _notesDefault.value
         _jsonSchema.value = chat.jsonSchema
+        _chatProjectId.value = chat.projectId?.takeIf { id -> _projects.value.any { it.id == id } }
         contextStale = false
         viewModelScope.launch { rebuildDocIndex() }
 
@@ -3514,7 +3901,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         vectorJob?.cancel()
         voiceListener?.stop()
         CoroutineScope(Dispatchers.IO).launch { runCatching { embedder.unload() } }
+        recorder?.stop()
         ReplyGateway.stopRequested = null
+        if (ReplyGateway.onNotificationReply === notificationReply) ReplyGateway.onNotificationReply = null
         ReplyService.stop(getApplication())
         if (ApiGateway.backend === apiBackend) ApiGateway.backend = null
         stopDeviceMonitoring()
@@ -3563,6 +3952,9 @@ class PocketViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_MAX_REPLY = SettingKeys.MAX_REPLY
         const val MAX_IMAGES = 4
         const val KEY_OCR_SCRIPT = "ocr_script"
+        const val KEY_SPEECH_MODEL = "speech_model"
+        const val SPEECH_KEEP_MS = 120_000L
+        const val KEY_CATALOG_UPDATES = "catalog_updates"
         const val KEY_MODEL_SETTINGS = "model_settings"
         const val KEY_NOTES = SettingKeys.NOTES
         const val KEY_SAVE_STATES = SettingKeys.SAVE_STATES
