@@ -138,6 +138,7 @@ fun ChatScreen(
     showHistoryButton: Boolean = true,
     onOpenModels: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenHealth: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val messages by vm.messages.collectAsStateWithLifecycle()
@@ -569,6 +570,7 @@ fun ChatScreen(
                         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        AssistChip(onClick = onOpenHealth, label = { Text("Health and fitness") })
                         characters.forEach { character ->
                             AssistChip(onClick = { vm.startChatAs(character) }, label = { Text(character.title) })
                         }

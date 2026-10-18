@@ -76,6 +76,7 @@ fun SettingsScreen(
     onOpenStorage: () -> Unit,
     onOpenCompare: () -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenHealth: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val mode by vm.themeMode.collectAsStateWithLifecycle()
@@ -571,6 +572,9 @@ fun SettingsScreen(
             )
 
             SectionTitle("Tools", Modifier.padding(top = 24.dp))
+            TextButton(onClick = onOpenHealth, Modifier.fillMaxWidth()) {
+                Text("Health and fitness", Modifier.weight(1f))
+            }
             TextButton(onClick = onOpenBenchmark, Modifier.fillMaxWidth()) {
                 Text("Benchmark the loaded model", Modifier.weight(1f))
             }

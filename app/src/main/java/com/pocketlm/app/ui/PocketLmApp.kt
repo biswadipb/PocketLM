@@ -25,7 +25,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketlm.app.PocketViewModel
 
-private enum class Screen { Chat, History, Starred, Scheduled, Customize, Models, Search, Settings, Benchmark, Storage, Compare, Logs }
+private enum class Screen { Chat, History, Starred, Scheduled, Customize, Models, Search, Settings, Benchmark, Storage, Compare, Logs, Health }
 
 private val HISTORY_PANE_WIDTH = 360.dp
 
@@ -89,6 +89,7 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                     onOpenHistory = {},
                     onOpenModels = { screen = Screen.Models },
                     onOpenSettings = { screen = Screen.Settings },
+                    onOpenHealth = { screen = Screen.Health },
                     showHistoryButton = false,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
@@ -101,6 +102,7 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                 onOpenHistory = { screen = Screen.History },
                 onOpenModels = { screen = Screen.Models },
                 onOpenSettings = { screen = Screen.Settings },
+                onOpenHealth = { screen = Screen.Health },
                 modifier = modifier,
             )
             Screen.History -> HistoryScreen(
@@ -145,6 +147,13 @@ fun PocketLmApp(vm: PocketViewModel = viewModel()) {
                 onOpenStorage = { screen = Screen.Storage },
                 onOpenCompare = { screen = Screen.Compare },
                 onOpenLogs = { screen = Screen.Logs },
+                onOpenHealth = { screen = Screen.Health },
+                modifier = modifier,
+            )
+            Screen.Health -> HealthScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpenChat = { screen = Screen.Chat },
                 modifier = modifier,
             )
             Screen.Logs -> LogScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)

@@ -37,12 +37,12 @@ import com.pocketlm.app.data.Experience
 import com.pocketlm.app.data.FoodEntry
 import com.pocketlm.app.data.FoodTable
 import com.pocketlm.app.data.Goal
+import com.pocketlm.app.data.HealthInput
 import com.pocketlm.app.data.HealthLogs
 import com.pocketlm.app.data.HealthProfile
 import com.pocketlm.app.data.HealthSafety
 import com.pocketlm.app.data.MealEstimate
 import com.pocketlm.app.data.Sex
-import com.pocketlm.app.data.Caution as HealthCaution
 
 /** One question with a row of choices to pick from. The chosen one is announced as selected. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -59,10 +59,10 @@ private fun <T> Choice(title: String, options: List<T>, selected: T, label: (T) 
 }
 
 /** The text in [text] as a whole number, or null when it is not one. */
-private fun String.wholeNumber(): Int? = trim().toIntOrNull()
+private fun String.wholeNumber(): Int? = HealthInput.wholeNumber(this)
 
 /** The text as a decimal number (a comma is accepted as the point), or null. */
-private fun String.decimal(): Float? = trim().replace(',', '.').toFloatOrNull()
+private fun String.decimal(): Float? = HealthInput.decimal(this)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
