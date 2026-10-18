@@ -1,0 +1,71 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.pocketlm.app"
+    compileSdk = 36
+    // The same NDK as the engine module, so Android Gradle can find its tools to strip the native libraries.
+    ndkVersion = "27.3.13750724"
+
+    defaultConfig {
+        applicationId = "com.pocketlm.app"
+        minSdk = 30
+        targetSdk = 36
+        versionCode = 1
+        versionName = "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    buildFeatures {
+        compose = true
+    }
+    packaging {
+        jniLibs {
+            // Built only so the OpenCL backend has something to link against. At run time the phone's own libOpenCL.so is used.
+            excludes += "**/libOpenCL.so"
+        }
+    }
+}
+
+dependencies {
+    implementation(project(":engine"))
+
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment)
+    implementation(libs.androidx.documentfile)
+    implementation(libs.pdfbox.android)
+    implementation(libs.mlkit.text.latin)
+    implementation(libs.mlkit.text.chinese)
+    implementation(libs.mlkit.text.devanagari)
+    implementation(libs.mlkit.text.japanese)
+    implementation(libs.mlkit.text.korean)
+    implementation(libs.play.services.base)
+    // Older ZIM files (Kiwix's offline Wikipedia) compress with xz; newer ones use Zstandard, which is read by data/Zstd.kt.
+    implementation(libs.xz)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons)
+    implementation(libs.kotlinx.coroutines.android)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.json)
+}

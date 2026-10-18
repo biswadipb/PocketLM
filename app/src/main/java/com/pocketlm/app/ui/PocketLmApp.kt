@@ -1,0 +1,170 @@
+package com.pocketlm.app.ui
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.dp
+import com.pocketlm.app.data.DisplayScale
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.pocketlm.app.PocketViewModel
+
+private enum class Screen { Chat, History, Starred, Scheduled, Customize, Models, Search, Settings, Benchmark, Storage, Compare, Logs, Health }
+
+private val HISTORY_PANE_WIDTH = 360.dp
+
+@Composable
+fun PocketLmApp(vm: PocketViewModel = viewModel()) {
+    var screen by rememberSaveable { mutableStateOf(Screen.Chat) }
+    val error by vm.error.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
+    val incoming by vm.incomingText.collectAsStateWithLifecycle()
+
+    LaunchedEffect(incoming) {
+        if (incoming != null) screen = Screen.Chat
+    }
+
+    val askRequests by vm.askRequests.collectAsStateWithLifecycle()
+    LaunchedEffect(askRequests) {
+        if (askRequests > 0) screen = Screen.Chat
+    }
+
+    LaunchedEffect(error) {
+        error?.let {
+            snackbar.showSnackbar(it)
+            vm.dismissError()
+        }
+    }
+
+    BackHandler(enabled = screen != Screen.Chat) {
+        screen = when (screen) {
+            Screen.Search -> Screen.Models
+            Screen.Starred, Screen.Scheduled, Screen.Customize -> Screen.History
+            Screen.Benchmark, Screen.Storage, Screen.Compare, Screen.Logs -> Screen.Settings
+            else -> Screen.Chat
+        }
+    }
+
+    // On a tablet, a foldable or a phone on its side, History stays in view beside the chat.
+    val wide = DisplayScale.isWide(LocalConfiguration.current.screenWidthDp)
+    LaunchedEffect(wide) {
+        if (wide && screen == Screen.History) screen = Screen.Chat
+    }
+
+    Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+        val modifier = Modifier.padding(padding)
+        if (wide && screen == Screen.Chat) {
+            val openChat by vm.openChatId.collectAsStateWithLifecycle()
+            Row(modifier.fillMaxSize()) {
+                HistoryScreen(
+                    vm,
+                    onBack = {},
+                    onOpened = {},
+                    onOpenStarred = { screen = Screen.Starred },
+                    onOpenScheduled = { screen = Screen.Scheduled },
+                    onOpenCustomize = { screen = Screen.Customize },
+                    embedded = true,
+                    selectedId = openChat,
+                    modifier = Modifier.width(HISTORY_PANE_WIDTH).fillMaxHeight(),
+                )
+                VerticalDivider()
+                ChatScreen(
+                    vm,
+                    onOpenHistory = {},
+                    onOpenModels = { screen = Screen.Models },
+                    onOpenSettings = { screen = Screen.Settings },
+                    onOpenHealth = { screen = Screen.Health },
+                    showHistoryButton = false,
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                )
+            }
+            return@Scaffold
+        }
+        when (screen) {
+            Screen.Chat -> ChatScreen(
+                vm,
+                onOpenHistory = { screen = Screen.History },
+                onOpenModels = { screen = Screen.Models },
+                onOpenSettings = { screen = Screen.Settings },
+                onOpenHealth = { screen = Screen.Health },
+                modifier = modifier,
+            )
+            Screen.History -> HistoryScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpened = { screen = Screen.Chat },
+                onOpenStarred = { screen = Screen.Starred },
+                onOpenScheduled = { screen = Screen.Scheduled },
+                onOpenCustomize = { screen = Screen.Customize },
+                modifier = modifier,
+            )
+            Screen.Scheduled -> ScheduledScreen(
+                vm,
+                onBack = { screen = Screen.History },
+                onOpened = { screen = Screen.Chat },
+                modifier = modifier,
+            )
+            Screen.Customize -> CustomizeScreen(
+                vm,
+                onBack = { screen = Screen.History },
+                onOpenSettings = { screen = Screen.Settings },
+                modifier = modifier,
+            )
+            Screen.Starred -> StarredScreen(
+                vm,
+                onBack = { screen = Screen.History },
+                onOpened = { screen = Screen.Chat },
+                modifier = modifier,
+            )
+            Screen.Models -> ModelsScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpenSearch = { screen = Screen.Search },
+                onModelLoaded = { screen = Screen.Chat },
+                modifier = modifier,
+            )
+            Screen.Search -> SearchScreen(vm, onBack = { screen = Screen.Models }, modifier = modifier)
+            Screen.Settings -> SettingsScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpenBenchmark = { screen = Screen.Benchmark },
+                onOpenStorage = { screen = Screen.Storage },
+                onOpenCompare = { screen = Screen.Compare },
+                onOpenLogs = { screen = Screen.Logs },
+                onOpenHealth = { screen = Screen.Health },
+                modifier = modifier,
+            )
+            Screen.Health -> HealthScreen(
+                vm,
+                onBack = { screen = Screen.Chat },
+                onOpenChat = { screen = Screen.Chat },
+                modifier = modifier,
+            )
+            Screen.Logs -> LogScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
+            Screen.Compare -> CompareScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
+            Screen.Benchmark -> BenchmarkScreen(vm, onBack = { screen = Screen.Settings }, modifier = modifier)
+            Screen.Storage -> StorageScreen(
+                vm,
+                onBack = { screen = Screen.Settings },
+                onOpenModels = { screen = Screen.Models },
+                modifier = modifier,
+            )
+        }
+    }
+}

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "note": "Models the app can offer beyond the ones built in. PocketLM reads this file when you open Models, if the setting is on. Only Hugging Face and ModelScope download links are accepted.",
+  "models": [
+    {
+      "name": "Qwen3 0.6B (thinks first)",
+      "description": "Tiny reasoning model: it writes out its thinking before answering. Use the thinking switch in Chat options to skip that.",
+      "fileName": "Qwen3-0.6B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
+      "sizeMb": 378
+    },
+    {
+      "name": "Qwen3 1.7B (thinks first)",
+      "description": "Small reasoning model that is still quick on recent phones.",
+      "fileName": "Qwen3-1.7B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+      "sizeMb": 1056
+    },
+    {
+      "name": "Qwen3 4B (thinks first)",
+      "description": "Noticeably smarter; wants a phone with 8 GB of RAM or more.",
+      "fileName": "Qwen3-4B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+      "sizeMb": 2382
+    },
+    {
+      "name": "Gemma 3 1B Instruct",
+      "description": "Google's small chat model.",
+      "fileName": "gemma-3-1b-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf",
+      "sizeMb": 769
+    },
+    {
+      "name": "Gemma 3 4B Instruct",
+      "description": "Google's mid-size chat model; wants 8 GB of RAM or more. Text only here.",
+      "fileName": "gemma-3-4b-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+      "sizeMb": 2375
+    },
+    {
+      "name": "SmolLM2 1.7B Instruct",
+      "description": "Hugging Face's small chat model.",
+      "fileName": "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+      "url": "https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+      "sizeMb": 1007
+    }
+  ],
+  "embeddings": []
+}
